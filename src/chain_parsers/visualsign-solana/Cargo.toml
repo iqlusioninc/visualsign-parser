@@ -77,6 +77,11 @@ base64 = "0.22.1"
 proptest = "1"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "idl_cache"
+harness = false
 
 [[bench]]
 name = "solana_stages"
