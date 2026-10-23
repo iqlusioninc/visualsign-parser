@@ -18,10 +18,10 @@ use crate::core::{
 };
 use crate::utils::decode_number;
 
-use sui_json_rpc_types::{
-    SuiArgument, SuiCallArg, SuiCommand, SuiProgrammableMoveCall, SuiReservation, SuiWithdrawFrom,
+use crate::types::{
+    ObjectID, SuiAddress, SuiArgument, SuiCallArg, SuiCommand, SuiProgrammableMoveCall,
+    SuiReservation, SuiWithdrawFrom,
 };
-use sui_types::base_types::{ObjectID, SuiAddress};
 
 use visualsign::{
     AnnotatedPayloadField, SignablePayloadField, SignablePayloadFieldCommon,
@@ -247,7 +247,9 @@ impl Side {
                 create_text_field("Collateral Withdrawal", &format!("All {symbol} collateral"))?
             }
             (Side::Debt, OperateAmount::Positive(value)) => coin.amount_field("Borrow", value)?,
-            (Side::Debt, OperateAmount::Negative(value)) => coin.amount_field("Repayment", value)?,
+            (Side::Debt, OperateAmount::Negative(value)) => {
+                coin.amount_field("Repayment", value)?
+            }
             (Side::Debt, OperateAmount::Max) => {
                 create_text_field("Repayment", &format!("All {symbol} debt"))?
             }
@@ -545,7 +547,9 @@ fn describe_balance(
             let source = argument_at(&call.arguments, 0, "coin").ok()?;
             describe_coin(context, source, index, Some(coin), depth + 1)
         }
-        ("balance", "redeem_funds") if call.package == ObjectID::from_single_byte(SUI_FRAMEWORK) => {
+        ("balance", "redeem_funds")
+            if call.package == ObjectID::from_single_byte(SUI_FRAMEWORK) =>
+        {
             describe_redeemed(context, call, coin)
         }
         ("balance", "split") if call.package == ObjectID::from_single_byte(SUI_FRAMEWORK) => {
@@ -621,7 +625,11 @@ fn find_changes(
                         .first()
                         .is_some_and(|first| refers_to(*first, value)) =>
             {
-                match (call.module.as_str(), call.function.as_str(), call.arguments.get(1)) {
+                match (
+                    call.module.as_str(),
+                    call.function.as_str(),
+                    call.arguments.get(1),
+                ) {
                     (_, "value", _) => {}
                     (_, "split", _) => reduced = true,
                     ("balance", "join", Some(other)) => match coin {
@@ -657,12 +665,16 @@ fn describe_coin(
     let sui = Coin::sui();
     match object {
         SuiArgument::GasCoin => "the gas coin's whole balance".to_string(),
-        SuiArgument::Input(_) => match input_at(context, object, "object").ok().and_then(SuiCallArg::object) {
+        SuiArgument::Input(_) => match input_at(context, object, "object")
+            .ok()
+            .and_then(SuiCallArg::object)
+        {
             Some(id) => format!("object {id} ({AMOUNT_NOT_IN_TRANSACTION})"),
             None => format!("an input ({AMOUNT_NOT_IN_TRANSACTION})"),
         },
         SuiArgument::Result(_) | SuiArgument::NestedResult(_, _) => {
-            let Ok((index, producer)) = producing_command(context, consumer, object, "object") else {
+            let Ok((index, producer)) = producing_command(context, consumer, object, "object")
+            else {
                 return format!("an object ({AMOUNT_NOT_IN_TRANSACTION})");
             };
             let changes_coin = match producer {
@@ -691,32 +703,44 @@ fn describe_coin(
                             format!("{} split from {from}", source_coin.display(amount))
                         }
                         (Some(amount), None) => format!("{amount} base units split from {from}"),
-                        (None, _) => format!("a coin split from {from} ({AMOUNT_NOT_IN_TRANSACTION})"),
+                        (None, _) => {
+                            format!("a coin split from {from} ({AMOUNT_NOT_IN_TRANSACTION})")
+                        }
                     }
                 }
                 SuiCommand::MoveCall(call) if depth <= DESCRIBE_DEPTH => {
                     match (call.module.as_str(), call.function.as_str()) {
-                        ("coin", "from_balance") if call.package == ObjectID::from_single_byte(SUI_FRAMEWORK) => {
+                        ("coin", "from_balance")
+                            if call.package == ObjectID::from_single_byte(SUI_FRAMEWORK) =>
+                        {
                             let balance_coin = Coin::from_type_argument(call, 0).ok();
                             let balance_coin = balance_coin.as_ref().or(coin);
                             match (call.arguments.first(), balance_coin) {
-                                (Some(balance), Some(balance_coin)) => {
-                                    describe_balance(context, *balance, index, balance_coin, depth + 1)
-                                        .unwrap_or_else(|| "an empty coin".to_string())
-                                }
+                                (Some(balance), Some(balance_coin)) => describe_balance(
+                                    context,
+                                    *balance,
+                                    index,
+                                    balance_coin,
+                                    depth + 1,
+                                )
+                                .unwrap_or_else(|| "an empty coin".to_string()),
                                 _ => format!("a coin ({AMOUNT_NOT_IN_TRANSACTION})"),
                             }
                         }
-                        ("coin", "redeem_funds") if call.package == ObjectID::from_single_byte(SUI_FRAMEWORK) => {
+                        ("coin", "redeem_funds")
+                            if call.package == ObjectID::from_single_byte(SUI_FRAMEWORK) =>
+                        {
                             let redeemed = Coin::from_type_argument(call, 0).ok();
                             match redeemed.as_ref().or(coin) {
                                 Some(redeemed) => describe_redeemed(context, call, redeemed),
-                                None => format!("a coin from an address balance ({AMOUNT_NOT_IN_TRANSACTION})"),
+                                None => format!(
+                                    "a coin from an address balance ({AMOUNT_NOT_IN_TRANSACTION})"
+                                ),
                             }
                         }
-                        (module, function) => format!(
-                            "an object returned by {module}::{function} at command {index}"
-                        ),
+                        (module, function) => {
+                            format!("an object returned by {module}::{function} at command {index}")
+                        }
                     }
                 }
                 _ => format!("an object from command {index}"),
@@ -727,7 +751,11 @@ fn describe_coin(
 }
 
 /// The reserved amount of a `redeem_funds`, which withdraws exactly that much.
-fn describe_redeemed(context: &VisualizerContext, call: &SuiProgrammableMoveCall, coin: &Coin) -> String {
+fn describe_redeemed(
+    context: &VisualizerContext,
+    call: &SuiProgrammableMoveCall,
+    coin: &Coin,
+) -> String {
     let withdrawal = call
         .arguments
         .first()
@@ -741,12 +769,19 @@ fn describe_redeemed(context: &VisualizerContext, call: &SuiProgrammableMoveCall
             };
             format!("{} from {owner} address balance", coin.display(amount))
         }
-        _ => format!("{} from an address balance ({AMOUNT_NOT_IN_TRANSACTION})", coin.symbol()),
+        _ => format!(
+            "{} from an address balance ({AMOUNT_NOT_IN_TRANSACTION})",
+            coin.symbol()
+        ),
     }
 }
 
 /// A pure `u64` input no command before `consumer` could have modified.
-fn decode_pure_amount(context: &VisualizerContext, argument: SuiArgument, consumer: usize) -> Option<u64> {
+fn decode_pure_amount(
+    context: &VisualizerContext,
+    argument: SuiArgument,
+    consumer: usize,
+) -> Option<u64> {
     ensure_unmodified_before(context, argument, consumer, "amount", |call| {
         call.package == ObjectID::from_single_byte(SUI_FRAMEWORK)
             && matches!(call.module.as_str(), "coin" | "balance")
@@ -948,18 +983,27 @@ fn resolve_operate<'a>(
         .collect();
     let mut listed = Vec::new();
     for (claim, also) in [
-        (col_claim, match &mut col_destination {
-            Destination::Address { also, .. } => Some(also),
-            Destination::Destroyed => None,
-        }),
-        (debt_claim, match &mut debt_destination {
-            Destination::Address { also, .. } => Some(also),
-            Destination::Destroyed => None,
-        }),
-        (cap_claim, match &mut cap {
-            CapDestination::Address { also, .. } => Some(also),
-            CapDestination::NotPassed => None,
-        }),
+        (
+            col_claim,
+            match &mut col_destination {
+                Destination::Address { also, .. } => Some(also),
+                Destination::Destroyed => None,
+            },
+        ),
+        (
+            debt_claim,
+            match &mut debt_destination {
+                Destination::Address { also, .. } => Some(also),
+                Destination::Destroyed => None,
+            },
+        ),
+        (
+            cap_claim,
+            match &mut cap {
+                CapDestination::Address { also, .. } => Some(also),
+                CapDestination::NotPassed => None,
+            },
+        ),
     ] {
         if let (Some((index, _)), Some(also)) = (claim, also)
             && !listed.contains(&index)
@@ -1048,7 +1092,12 @@ fn preview_field(
     }
     if let CapDestination::Address { recipient, also } = &operation.cap {
         key_rows.push(recipient_field(context, "Position Owner", *recipient)?);
-        key_rows.extend(create_also_field(context, "Position Owner", *recipient, also)?);
+        key_rows.extend(create_also_field(
+            context,
+            "Position Owner",
+            *recipient,
+            also,
+        )?);
     }
     key_rows.push(create_text_field(
         "Network",
@@ -1099,7 +1148,9 @@ fn preview_field(
                 title: Some(SignablePayloadFieldTextV2 {
                     text: summary.title,
                 }),
-                subtitle: summary.subtitle.map(|text| SignablePayloadFieldTextV2 { text }),
+                subtitle: summary
+                    .subtitle
+                    .map(|text| SignablePayloadFieldTextV2 { text }),
                 condensed: Some(SignablePayloadFieldListLayout { fields: key_rows }),
                 expanded: Some(SignablePayloadFieldListLayout { fields: every_row }),
             },
@@ -1137,14 +1188,7 @@ fn recipient_field(
     } else {
         "Not the signer's address"
     };
-    create_address_field(
-        label,
-        &recipient.to_string(),
-        Some(name),
-        None,
-        None,
-        None,
-    )
+    create_address_field(label, &recipient.to_string(), Some(name), None, None, None)
 }
 
 #[cfg(test)]
