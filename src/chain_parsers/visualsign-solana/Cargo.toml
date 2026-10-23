@@ -26,9 +26,9 @@ clap            = { version = "4.0", features = ["derive"], optional = true }
 parser_cli_core = { path = "../../parser/cli-core", optional = true }
 
 tracing = { workspace = true }
-# Pinned to anchorageoss/solana-parser#14 (split Anza crates). Repoint at
-# anchorageoss/solana-parser once that PR merges.
-solana_parser = { git = "https://github.com/iqlusioninc/solana-parser.git", rev = "f269037acaf697233048394e5ecae09320b442bf" }
+# Sigil integration: split Anza + compact-u16 + precomputed IDLs + SizeGuard.
+# Track upstream #14/#15/#16/#18 before replacing this consolidated fork pin.
+solana_parser = { git = "https://github.com/iqlusioninc/solana-parser.git", rev = "563f7e03dcf5a34050156360ec6f678b839f7ca9" }
 visualsign = { workspace = true }
 generated = { path = "../../generated" }
 serde = { workspace = true }
@@ -69,7 +69,7 @@ thiserror = "2.0.12"
 solana-hash = { version = "4.7.0", features = ["atomic"] }
 solana-signature = { version = "3.6.0", features = ["serde"] }
 parser_cli_core = { path = "../../parser/cli-core", features = ["test-utils"] }
-solana-parser-fuzz-core = { git = "https://github.com/iqlusioninc/solana-parser.git", rev = "f269037acaf697233048394e5ecae09320b442bf", features = ["proptest"] }
+solana-parser-fuzz-core = { git = "https://github.com/iqlusioninc/solana-parser.git", rev = "563f7e03dcf5a34050156360ec6f678b839f7ca9", features = ["proptest"] }
 solana_test_utils = { path = "../../solana_test_utils" }
 serde_json = "1.0"
 jupiter-swap-api-client = "0.2.0"
