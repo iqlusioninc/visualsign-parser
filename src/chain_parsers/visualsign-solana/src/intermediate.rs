@@ -34,8 +34,8 @@ use solana_message::{AccountKeys, VersionedMessage};
 use solana_parser::solana::idl_parser::construct_idl_records_map;
 #[cfg(feature = "simulation")]
 use solana_parser::solana::idl_parser::{
-    create_accounts_map, find_instruction_by_discriminator_ref,
-    parse_data_into_args, resolve_idl_ref,
+    create_accounts_map, find_instruction_by_discriminator_ref, parse_data_into_args,
+    resolve_idl_ref,
 };
 use solana_parser::solana::structs::{
     self as parser, IdlParseError, IdlSource, SolanaMetadata, SolanaParsedInstructionData,
@@ -68,17 +68,20 @@ const UNSUPPORTED_NATIVE_PROGRAM: &str = "program has no native decoder";
 /// Version of the `SolanaIntermediateOutput` Borsh schema. Bump on ANY change
 /// to the shape below. Mirrored decoders assert this value, so a bump makes a
 /// schema drift fail loudly instead of silently misparsing.
-pub const SOLANA_INTERMEDIATE_SCHEMA_VERSION: u16 = 5;
+pub const SOLANA_INTERMEDIATE_SCHEMA_VERSION: u16 = 6;
 
-/// Native decoding available in this build. This is independent of whether
-/// any particular instruction is valid or supported by the decoder.
+/// Native jsonParsed mapping available in this build. This is independent of
+/// whether any particular instruction is valid or supported by the decoder.
+/// The typed `confidential_transfer` field uses its own wire decoder in every
+/// build, independently of this capability tag.
 ///
 /// Schema v5 adds this tag immediately after the version. Mirrored consumers
 /// must read it before decoding the account keys and instruction collections.
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[borsh(use_discriminant = true)]
 pub enum SolanaNativeInstructionDecoder {
-    /// `json-parsed` is disabled; only Compute Budget uses a local decoder.
+    /// `json-parsed` is disabled; only Compute Budget populates the native
+    /// `parsed_instruction_data` mapping.
     ComputeBudgetOnly = 0,
     /// Solana's `jsonParsed` decoder and the local Compute Budget decoder.
     JsonParsed = 1,
@@ -90,6 +93,90 @@ const NATIVE_INSTRUCTION_DECODER: SolanaNativeInstructionDecoder = if cfg!(featu
 } else {
     SolanaNativeInstructionDecoder::ComputeBudgetOnly
 };
+
+const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+
+/// Borsh-serializable mirror of
+/// [`crate::presets::token_2022::ConfidentialTransferIx`] for the policy
+/// engine's intermediate output.
+///
+/// The `Transfer` variant deliberately carries no amount field: the transfer
+/// amount is confidential (encrypted on-chain) and a wallet-decoded value
+/// must never be placed in this trust boundary. `Withdraw`'s amount is
+/// plaintext in the instruction itself, so it is safe to include.
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ConfidentialTransferIo {
+    Withdraw {
+        source_token_account: String,
+        mint: String,
+        owner: String,
+        amount: u64,
+        decimals: u8,
+        new_decryptable_available_balance: String,
+        equality_proof_context_account: Option<String>,
+        range_proof_context_account: Option<String>,
+    },
+    Transfer {
+        source_token_account: String,
+        mint: String,
+        destination_token_account: String,
+        owner: String,
+        new_source_decryptable_available_balance: String,
+        /// Nonzero auditor ciphertext presence, not verified mint configuration.
+        auditor_configured: bool,
+        equality_proof_context_account: Option<String>,
+        validity_proof_context_account: Option<String>,
+        range_proof_context_account: Option<String>,
+    },
+}
+
+impl From<crate::presets::token_2022::ConfidentialTransferIx> for ConfidentialTransferIo {
+    fn from(ix: crate::presets::token_2022::ConfidentialTransferIx) -> Self {
+        use crate::presets::token_2022::ConfidentialTransferIx as Ix;
+        match ix {
+            Ix::Withdraw {
+                source_token_account,
+                mint,
+                owner,
+                amount,
+                decimals,
+                new_decryptable_available_balance,
+                equality_proof_context_account,
+                range_proof_context_account,
+            } => Self::Withdraw {
+                source_token_account,
+                mint,
+                owner,
+                amount,
+                decimals,
+                new_decryptable_available_balance,
+                equality_proof_context_account,
+                range_proof_context_account,
+            },
+            Ix::Transfer {
+                source_token_account,
+                mint,
+                destination_token_account,
+                owner,
+                new_source_decryptable_available_balance,
+                auditor_configured,
+                equality_proof_context_account,
+                validity_proof_context_account,
+                range_proof_context_account,
+            } => Self::Transfer {
+                source_token_account,
+                mint,
+                destination_token_account,
+                owner,
+                new_source_decryptable_available_balance,
+                auditor_configured,
+                equality_proof_context_account,
+                validity_proof_context_account,
+                range_proof_context_account,
+            },
+        }
+    }
+}
 
 /// Top-level Solana intermediate output. Mirrors `solana_parser::SolanaMetadata`
 /// minus `signatures`.
@@ -160,6 +247,9 @@ pub struct SolanaIntermediateInstruction {
     /// Why a `Native` instruction has no `parsed_instruction_data`: unsupported
     /// program, decoder rejection, or an unmapped decode. `None` otherwise.
     pub solana_json_parse_error: Option<String>,
+    /// Token-2022 CT Transfer/Withdraw decoded from wire data only.
+    /// No wallet-supplied decrypted amounts enter this policy field.
+    pub confidential_transfer: Option<ConfidentialTransferIo>,
 }
 
 /// Where a program ID was recognized. Decodability is a separate question --
@@ -427,6 +517,29 @@ impl From<&IdlParseError> for SolanaIdlParseError {
     }
 }
 
+/// Decode a Token-2022 ConfidentialTransfer Transfer/Withdraw sub-instruction
+/// from a parsed instruction's hex data and account list, if applicable.
+///
+/// Returns `None` for non-Token-2022 programs, undecodable hex, decode
+/// errors, or any CT sub-instruction other than Transfer/Withdraw.
+fn decode_confidential_transfer(
+    value: &parser::SolanaInstruction,
+) -> Option<ConfidentialTransferIo> {
+    if value.program_key != TOKEN_2022_PROGRAM_ID {
+        return None;
+    }
+    let data = visualsign::encodings::decode_hex(&value.instruction_data_hex).ok()?;
+    let account_strings: Vec<String> = value
+        .accounts
+        .iter()
+        .map(|a| a.account_key.clone())
+        .collect();
+    crate::presets::token_2022::try_decode_confidential_transfer(&data, &account_strings)
+        .ok()
+        .flatten()
+        .map(ConfidentialTransferIo::from)
+}
+
 /// Not a `From` impl: `registered_source` needs the caller IDL keys and the
 /// native decode the compiled form, which `parser::SolanaInstruction` lacks.
 fn build_intermediate_instruction(
@@ -456,6 +569,7 @@ fn build_intermediate_instruction(
             .map(SolanaSingleAddressTableLookup::from)
             .collect(),
         registered_source,
+        confidential_transfer: decode_confidential_transfer(value),
         parsed_instruction_data,
         idl_parse_error: value
             .idl_parse_error
@@ -1120,6 +1234,7 @@ fn parse_anchor_event_cpi(
 /// The raw JSON of the IDL a record resolved to, for the `events` that
 /// `solana_parser::Idl` drops. Preset records don't keep their JSON on the
 /// heap, so theirs comes from the binary; built-in IDLs are embedded too.
+#[cfg(feature = "simulation")]
 fn resolved_idl_json<'a>(
     idl_record: &'a solana_parser::solana::structs::IdlRecord,
     idl_source: &IdlSource,
@@ -1418,9 +1533,9 @@ mod tests {
     use super::*;
     use base64::Engine;
     use serde_json::json;
+    use solana_hash::Hash;
     use solana_message::{MessageHeader, legacy, v0};
     use solana_parser::solana::structs::{IdlRecord, ProgramType};
-    use solana_hash::Hash;
     use std::collections::HashMap;
 
     fn args_map(values: &[(&str, Value)]) -> serde_json::Map<String, Value> {
@@ -2735,7 +2850,7 @@ mod tests {
         for count in [127, 128, 300] {
             for with_lookup_table in [false, true] {
                 let message = system_transfers(count, with_lookup_table);
-                let message_hex = hex::encode(message.serialize());
+                let message_hex = hex::encode(bincode::serialize(&message).unwrap());
                 let output =
                     extract_solana_intermediate_output(&message_hex, false, &IdlRegistry::new())
                         .unwrap_or_else(|e| {
@@ -2760,6 +2875,55 @@ mod capability_tests {
     use super::*;
 
     #[test]
+    fn confidential_withdraw_policy_uses_only_matching_program_wire_fields() {
+        let mut data = vec![27, 6];
+        data.extend_from_slice(&1_500_000u64.to_le_bytes());
+        data.push(6);
+        data.extend_from_slice(&[0; 38]);
+        let mut instruction = parser::SolanaInstruction {
+            program_key: TOKEN_2022_PROGRAM_ID.to_string(),
+            accounts: ["source", "mint", "equality", "range", "owner"]
+                .into_iter()
+                .map(|account_key| parser::SolanaAccount {
+                    account_key: account_key.to_string(),
+                    signer: false,
+                    writable: false,
+                })
+                .collect(),
+            instruction_data_hex: hex::encode(&data),
+            address_table_lookups: vec![],
+            parsed_instruction: None,
+            idl_parse_error: None,
+        };
+        let policy = build_intermediate_instruction(&instruction, None, &BTreeMap::new());
+        assert!(matches!(policy.confidential_transfer,
+            Some(ConfidentialTransferIo::Withdraw {
+                amount: 1_500_000, decimals: 6, ref owner,
+                ref equality_proof_context_account, ref range_proof_context_account, ..
+            }) if owner == "owner"
+                && equality_proof_context_account.as_deref() == Some("equality")
+                && range_proof_context_account.as_deref() == Some("range")));
+        let bytes = borsh::to_vec(&policy).unwrap();
+        assert_eq!(
+            borsh::from_slice::<SolanaIntermediateInstruction>(&bytes).unwrap(),
+            policy
+        );
+        instruction.program_key = "11111111111111111111111111111111".to_string();
+        assert!(
+            build_intermediate_instruction(&instruction, None, &BTreeMap::new())
+                .confidential_transfer
+                .is_none()
+        );
+        instruction.program_key = TOKEN_2022_PROGRAM_ID.to_string();
+        instruction.instruction_data_hex = "1b06".to_string();
+        assert!(
+            build_intermediate_instruction(&instruction, None, &BTreeMap::new())
+                .confidential_transfer
+                .is_none()
+        );
+    }
+
+    #[test]
     fn intermediate_wire_identifies_native_decoder_capability() {
         let metadata = SolanaMetadata {
             signatures: vec![],
@@ -2774,7 +2938,7 @@ mod capability_tests {
         let output = build_intermediate_output(&metadata, None, &BTreeMap::new());
         let bytes = borsh::to_vec(&output).expect("serializes intermediate output");
         // Consumers inspect the version before reading the capability tag.
-        assert_eq!(&bytes[..2], &[5, 0]);
+        assert_eq!(&bytes[..2], &[6, 0]);
         #[cfg(feature = "json-parsed")]
         assert_eq!(bytes[2], 1, "jsonParsed decoder is available");
         #[cfg(not(feature = "json-parsed"))]

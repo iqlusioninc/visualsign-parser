@@ -1447,9 +1447,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.8.5"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34af8d1a0e25924bc5b7c43c079c942339d8f0a8b57c39049bef581b46327404"
+checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -2482,7 +2482,7 @@ dependencies = [
  "num-bigint",
  "num-derive 0.4.2",
  "num-traits",
- "rand 0.8.5",
+ "rand 0.8.6",
  "serde",
  "serde_bytes",
  "serde_derive",
@@ -3217,7 +3217,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3324d46c7f7b7f5d34bf7dc71a2883bdc072c7b28ca81d0b2167ecec4cf8da9f"
 dependencies = [
  "agave-feature-set",
- "rand 0.8.5",
+ "rand 0.8.6",
  "semver",
  "serde",
  "serde_derive",
@@ -3292,7 +3292,7 @@ dependencies = [
  "merlin",
  "num-derive 0.4.2",
  "num-traits",
- "rand 0.8.5",
+ "rand 0.8.6",
  "serde",
  "serde_derive",
  "serde_json",
@@ -3340,7 +3340,7 @@ dependencies = [
 [[package]]
 name = "solana_parser"
 version = "0.1.0"
-source = "git+https://github.com/iqlusioninc/solana-parser.git?rev=f269037acaf697233048394e5ecae09320b442bf#f269037acaf697233048394e5ecae09320b442bf"
+source = "git+https://github.com/iqlusioninc/solana-parser.git?rev=563f7e03dcf5a34050156360ec6f678b839f7ca9#563f7e03dcf5a34050156360ec6f678b839f7ca9"
 dependencies = [
  "bincode",
  "bs58",
@@ -4232,6 +4232,7 @@ dependencies = [
  "bincode",
  "borsh 1.6.1",
  "bs58",
+ "bytemuck",
  "clap",
  "ed25519-dalek 2.2.0",
  "generated",

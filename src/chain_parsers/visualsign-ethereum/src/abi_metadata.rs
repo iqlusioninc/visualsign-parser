@@ -1077,6 +1077,7 @@ mod tests {
                 network_id: None,
                 idl: None,
                 idl_mappings: Default::default(),
+                confidential_transfer_hints: Default::default(),
                 simulated_transaction_result: None,
             })),
         };

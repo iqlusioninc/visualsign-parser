@@ -766,6 +766,7 @@ mod tests {
                 idl: Some(idl.clone()),
                 idl_mappings,
                 simulated_transaction_result: None,
+                confidential_transfer_hints: std::collections::BTreeMap::new(),
             })),
         };
 
@@ -783,6 +784,7 @@ mod tests {
         expected.extend_from_slice(key.as_bytes());
         encode_idl(&idl, &mut expected);
         expected.push(0); // SolanaMetadata.simulated_transaction_result: Option<String>: None
+        expected.extend_from_slice(&0u32.to_le_bytes()); // confidential_transfer_hints: empty map
 
         assert_eq!(chain_metadata_bytes(Some(&metadata)).unwrap(), expected);
     }

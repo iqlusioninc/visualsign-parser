@@ -4,7 +4,10 @@
 use defuse_core::intents::DefuseIntents;
 use defuse_core::payload::multi::MultiPayload;
 use defuse_core::payload::{DefusePayload, ExtractDefusePayload};
+use defuse_core::ton_connect::TonConnectPayloadSchema;
 use defuse_crypto::SignedPayload;
+
+use crate::strict;
 
 /// Outcome of verifying one payload's signature.
 #[derive(Debug)]
@@ -56,8 +59,59 @@ pub(crate) fn verify_and_extract(
     let extracted = payload
         .clone()
         .extract_defuse_payload()
-        .map_err(|e| e.to_string());
+        .map_err(|e| e.to_string())
+        .and_then(|defuse| {
+            // The typed extraction ignores keys it does not declare, so check the
+            // signed text itself: an undeclared key is part of what the signer
+            // signed but would never render.
+            match signed_payload_json(payload) {
+                Some((json, allowed)) => {
+                    strict::require_declared_keys(json.as_bytes(), allowed).map(|()| defuse)
+                }
+                None => Ok(defuse),
+            }
+        });
     (check, extracted)
+}
+
+/// The JSON text each standard's `extract_defuse_payload` parses, and the key
+/// set it must satisfy. Matched exhaustively so a new standard has to say where
+/// its signed text lives rather than skip the check.
+fn signed_payload_json(payload: &MultiPayload) -> Option<(&str, &'static [&'static str])> {
+    match payload {
+        // NEP-413 signs the envelope; the intents ride in its `message`, which
+        // carries its own key set (`verifying_contract` and `nonce` come from the
+        // envelope).
+        MultiPayload::Nep413(signed) => Some((
+            signed.payload.message.as_str(),
+            strict::NEP413_INTENTS_MESSAGE_KEYS,
+        )),
+        MultiPayload::Erc191(signed) => {
+            Some((signed.payload.0.as_str(), strict::DEFUSE_PAYLOAD_KEYS))
+        }
+        MultiPayload::Tip191(signed) => {
+            Some((signed.payload.0.as_str(), strict::DEFUSE_PAYLOAD_KEYS))
+        }
+        MultiPayload::RawEd25519(signed) => {
+            Some((signed.payload.as_str(), strict::DEFUSE_PAYLOAD_KEYS))
+        }
+        MultiPayload::WebAuthn(signed) => {
+            Some((signed.payload.as_str(), strict::DEFUSE_PAYLOAD_KEYS))
+        }
+        MultiPayload::Sep53(signed) => {
+            Some((signed.payload.payload.as_str(), strict::DEFUSE_PAYLOAD_KEYS))
+        }
+        // Only a text payload carries intents; extraction already refuses the
+        // others, so there is nothing further to check.
+        MultiPayload::TonConnect(signed) => {
+            #[allow(irrefutable_let_patterns)]
+            if let TonConnectPayloadSchema::Text(text) = &signed.payload.payload {
+                Some((text.text.as_str(), strict::DEFUSE_PAYLOAD_KEYS))
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// Rejects secp256k1 signatures whose recovery byte is out of range before
@@ -101,7 +155,7 @@ fn invalid_secp256k1_recovery_id_reason(payload: &MultiPayload) -> Option<String
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::presets::intents::args::decode_args;
+    use crate::args::decode_args;
 
     /// The signed payload is verbatim from the pinned dependency's own test
     /// suite -- `defuse/v0.4.2`, `core/src/payload/multi.rs:120` (`fn
@@ -114,7 +168,7 @@ mod tests {
     /// byte-for-byte, so the format cannot be updated without invalidating the
     /// vector. Extraction of a current-format ed25519 envelope is covered by
     /// `super::tests::pipeline_decodes_and_renders_intent_section`.
-    const VECTOR: &[u8] = include_bytes!("../../../tests/fixtures/_vector_raw_ed25519.input");
+    const VECTOR: &[u8] = include_bytes!("../tests/fixtures/_vector_raw_ed25519.input");
 
     #[test]
     fn valid_signature_verifies_natively() {
@@ -177,7 +231,7 @@ mod tests {
     /// longer verifies, not as a fixture that silently rewrites itself under
     /// `UPDATE_TESTDATA=1` and still "passes". `build_erc191_vector()` is used
     /// solely by the drift check below.
-    const ERC191_VECTOR: &[u8] = include_bytes!("../../../tests/fixtures/_vector_erc191.input");
+    const ERC191_VECTOR: &[u8] = include_bytes!("../tests/fixtures/_vector_erc191.input");
 
     fn erc191_vector_path() -> String {
         format!(

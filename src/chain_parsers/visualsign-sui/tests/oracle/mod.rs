@@ -330,13 +330,27 @@ fn newer_sdk_variants_are_rejected_by_the_pinned_upstream_decoder() {
 
 #[test]
 fn fluid_fixture_cases_match_the_pre_migration_type_oracle() {
-    let data: Value = serde_json::from_str(include_str!(
-        "../../src/integrations/fluid/aggregated_test_data.json"
-    ))
-    .unwrap();
+    // Current deployment and historical transactions are separate fixture sets
+    // since Fluid #599. Keep the independent type oracle over both sets.
     let mut fixtures = Vec::new();
-    walk_fixtures(&data, "fluid", &mut fixtures);
-    assert_eq!(fixtures.len(), 10);
+    for (label, fixture, expected_count) in [
+        (
+            "fluid/current",
+            include_str!("../../src/integrations/fluid/aggregated_test_data.json"),
+            2,
+        ),
+        (
+            "fluid/previous",
+            include_str!("../../src/integrations/fluid/previous_deployment_test_data.json"),
+            12,
+        ),
+    ] {
+        let data: Value = serde_json::from_str(fixture).unwrap();
+        let before = fixtures.len();
+        walk_fixtures(&data, label, &mut fixtures);
+        assert_eq!(fixtures.len() - before, expected_count, "{label}");
+    }
+    assert_eq!(fixtures.len(), 14);
     for (label, encoded) in fixtures {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&encoded)

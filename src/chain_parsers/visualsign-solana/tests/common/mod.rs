@@ -136,6 +136,7 @@ pub fn options_with_idl(program_id: &Pubkey, idl_json: &str, name: &str) -> Visu
                 // Boundary conversion: generated proto type uses HashMap; we keep
                 // BTreeMap locally per crate-wide determinism rule.
                 idl_mappings: idl_mappings.into_iter().collect(),
+                confidential_transfer_hints: Default::default(),
                 network_id: None,
                 idl: None,
                 simulated_transaction_result: None,

@@ -127,6 +127,7 @@ pub(crate) fn create_chain_metadata(
             network_id: None,
             idl: None,
             idl_mappings: idl_mappings.into_iter().collect(),
+            confidential_transfer_hints: Default::default(),
             simulated_transaction_result: simulated_tx_result.map(str::to_string),
         })),
     })

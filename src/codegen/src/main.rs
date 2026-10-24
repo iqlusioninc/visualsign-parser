@@ -51,6 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .type_attribute(".parser.ChainMetadata", SERDE_DERIVE)
         .type_attribute(".parser.EthereumMetadata", SERDE_DERIVE)
         .type_attribute(".parser.SolanaMetadata", SERDE_DERIVE)
+        .type_attribute(".parser.SolanaConfidentialTransferHint", SERDE_DERIVE)
         .type_attribute(".parser.NearMetadata", SERDE_DERIVE)
         .type_attribute(".parser.TokenMetadataEntry", SERDE_DERIVE)
         .type_attribute(".parser.Abi", SERDE_DERIVE)
@@ -63,6 +64,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // serde(default) on map fields so callers can omit them when empty
         .field_attribute(".parser.EthereumMetadata.abi_mappings", SERDE_DEFAULT)
         .field_attribute(".parser.SolanaMetadata.idl_mappings", SERDE_DEFAULT)
+        .field_attribute(
+            ".parser.SolanaMetadata.confidential_transfer_hints",
+            SERDE_DEFAULT,
+        )
         .field_attribute(".parser.NearMetadata.token_mappings", SERDE_DEFAULT)
         // serde(default) so JSON callers written before this field existed
         // (empty payment_marker) keep deserializing without a code change.
@@ -84,6 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .type_attribute(".parser.Metadata", BORSH_DERIVE)
         .enum_attribute(".parser.Metadata", BORSH_ENUM_DISC_ATTR)
         .type_attribute(".parser.SolanaMetadata", BORSH_DERIVE)
+        .type_attribute(".parser.SolanaConfidentialTransferHint", BORSH_DERIVE)
         .enum_attribute(".parser.SolanaMetadata", BORSH_ENUM_DISC_ATTR)
         .type_attribute(".parser.EthereumMetadata", BORSH_DERIVE)
         .enum_attribute(".parser.EthereumMetadata", BORSH_ENUM_DISC_ATTR)

@@ -28,11 +28,9 @@
 use base64::Engine;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use serde::Deserialize;
-use solana_sdk::{
-    instruction::{AccountMeta, Instruction},
-    message::Message,
-    pubkey::Pubkey,
-};
+use solana_instruction::{AccountMeta, Instruction};
+use solana_message::Message;
+use solana_pubkey::Pubkey;
 use std::{fs, hint::black_box, path::PathBuf, str::FromStr};
 use visualsign::vsptrait::{Transaction, VisualSignConverter, VisualSignOptions};
 use visualsign_solana::{
@@ -120,7 +118,7 @@ fn fixture_inputs(rel_path: &str) -> (String, String) {
     let instruction = Instruction::new_with_bytes(program_id, &data, accounts);
     let message = Message::new(&[instruction], Some(&fee_payer));
 
-    let serialized = message.serialize();
+    let serialized = bincode::serialize(&message).expect("fixture message serializes");
     let mut bytes = vec![0u8]; // zero signatures
     bytes.extend_from_slice(&serialized);
     (

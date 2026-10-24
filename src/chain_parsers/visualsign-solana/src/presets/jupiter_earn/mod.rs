@@ -11,9 +11,7 @@ use crate::core::{
 use crate::presets::associated_token_account::interface::get_associated_token_address_with_program_id;
 use crate::utils::{TokenInfo, format_token_amount, lookup_token, truncate_address};
 use config::JupiterEarnConfig;
-use solana_parser::{
-    Idl, SolanaParsedInstructionData, decode_idl_data,
-};
+use solana_parser::{Idl, SolanaParsedInstructionData, decode_idl_data};
 use solana_pubkey::Pubkey;
 use std::collections::BTreeMap;
 use std::str::FromStr;

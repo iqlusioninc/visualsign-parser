@@ -5,9 +5,13 @@ edition = "2024"
 rust-version.workspace = true
 
 [features]
+
+# Render NEAR Intents carried in an off-chain message. Optional so a build
+# that does not serve intents links neither the decoder nor its defuse deps.
+intents = ["dep:visualsign-intents"]
 default    = ["cli-plugin", "simulation", "stake-pool"]
 cli-plugin = ["dep:clap", "dep:parser_cli_core"]
-diagnostics = ["visualsign/diagnostics"]
+diagnostics = ["visualsign/diagnostics", "visualsign-intents?/diagnostics"]
 # Solana's `jsonParsed` decoder for native programs, used by the intermediate
 # output. Pulls solana-transaction-status 2.x (solana-sdk 2.x, openssl-sys,
 # zstd-sys), which does not build for iOS. Off: native instructions in the
@@ -30,11 +34,13 @@ tracing = { workspace = true }
 # Track upstream #14/#15/#16/#18 before replacing this consolidated fork pin.
 solana_parser = { git = "https://github.com/iqlusioninc/solana-parser.git", rev = "563f7e03dcf5a34050156360ec6f678b839f7ca9" }
 visualsign = { workspace = true }
+visualsign-intents = { path = "../../visualsign-intents", optional = true }
 generated = { path = "../../generated" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
 base64 = "0.22.1"
+bytemuck = "1.25.0"
 borsh = "1.5.5"
 bincode = "1.3.3"
 # Split Anza crates, not solana-sdk 2.x: solana-sdk pulls
@@ -77,7 +83,6 @@ base64 = "0.22.1"
 proptest = "1"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]
 name = "idl_cache"

@@ -277,6 +277,26 @@ pub struct SolanaMetadata {
     pub simulated_transaction_result: ::core::option::Option<
         ::prost::alloc::string::String,
     >,
+    /// Wallet-supplied transfer amounts in base units, for UI only.
+    /// Never used for policy decisions or confidential intermediate output.
+    #[prost(btree_map = "uint32, message", tag = "4")]
+    #[cfg_attr(feature = "serde_derive", serde(default))]
+    pub confidential_transfer_hints: ::prost::alloc::collections::BTreeMap<
+        u32,
+        SolanaConfidentialTransferHint,
+    >,
+}
+#[cfg_attr(
+    feature = "serde_derive",
+    derive(::serde::Serialize, ::serde::Deserialize),
+    serde(rename_all = "camelCase")
+)]
+#[derive(borsh::BorshSerialize, borsh::BorshDeserialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SolanaConfidentialTransferHint {
+    #[prost(uint64, optional, tag = "1")]
+    pub decoded_amount: ::core::option::Option<u64>,
 }
 #[cfg_attr(
     feature = "serde_derive",
@@ -389,6 +409,7 @@ pub enum Chain {
     Sui = 4,
     Tron = 5,
     Near = 6,
+    Zcash = 7,
     /// Custom for extensibility
     Custom = 999,
 }
@@ -406,6 +427,7 @@ impl Chain {
             Chain::Sui => "CHAIN_SUI",
             Chain::Tron => "CHAIN_TRON",
             Chain::Near => "CHAIN_NEAR",
+            Chain::Zcash => "CHAIN_ZCASH",
             Chain::Custom => "CHAIN_CUSTOM",
         }
     }
@@ -419,6 +441,7 @@ impl Chain {
             "CHAIN_SUI" => Some(Self::Sui),
             "CHAIN_TRON" => Some(Self::Tron),
             "CHAIN_NEAR" => Some(Self::Near),
+            "CHAIN_ZCASH" => Some(Self::Zcash),
             "CHAIN_CUSTOM" => Some(Self::Custom),
             _ => None,
         }

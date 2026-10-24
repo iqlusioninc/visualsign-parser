@@ -357,6 +357,7 @@ const PRESET_IDL_JSONS: &[(&str, &str)] = &[
 ];
 
 /// The compiled-in IDL JSON for a preset program, if it has one.
+#[cfg(feature = "simulation")]
 pub(crate) fn preset_idl_json(program_id: &str) -> Option<&'static str> {
     PRESET_IDL_JSONS
         .iter()

@@ -24,7 +24,7 @@ PARSER_APP_CHAINS := $(sort $(patsubst visualsign-%,%,$(notdir $(wildcard chain_
 # derived from chain_parsers/* -- parser_cli only wires up chains that have a
 # ChainPlugin registered (see parser/cli/src/), which sui and unspecified
 # don't yet, so a subset is the actual rule and a literal list says so.
-PARSER_CLI_CHAINS := bitcoin ethereum near solana tron
+PARSER_CLI_CHAINS := bitcoin ethereum near solana tron zcash
 
 .PHONY: all
 all: generated
@@ -54,7 +54,14 @@ test: build
 	cargo test --no-fail-fast -p visualsign --features diagnostics --lib
 	cargo test --no-fail-fast -p parser_cli_core --features diagnostics --lib
 	cargo test --no-fail-fast -p visualsign-near --features diagnostics --lib
+	cargo test --no-fail-fast -p visualsign-near --features diagnostics --test onchain_render_snapshot
+	@# dev-signing ON: the CLI token-metadata tests, whose signing helper moved to
+	@# visualsign-intents and so is out of reach of this crate's cfg(test).
+	cargo test --no-fail-fast -p visualsign-near --features dev-signing --lib
 	cargo test --no-fail-fast -p visualsign-solana --features diagnostics --lib
+	@# intents ON: the message path that renders a DefusePayload carried by a
+	@# Solana signature rather than a NEAR one.
+	cargo test --no-fail-fast -p visualsign-solana --features intents --lib
 
 # Solana preset sources, which `cargo fmt` cannot reach. `presets/mod.rs`
 # declares its submodules through `include!(concat!(env!("OUT_DIR"), ...))`, a
@@ -107,15 +114,17 @@ lint: fmt-check
 
 # Library crates that must build for Apple Silicon (iOS device) with no
 # C/C++/asm in the dependency tree. Add a chain here once its crate passes.
-APPLE_NO_C_CRATES := visualsign visualsign-ethereum visualsign-tron visualsign-unspecified
+# Minimal library features match the Sigil embedding configuration. Solana's
+# app-oriented defaults include native JSON/simulation dependencies with C.
+APPLE_NO_C_CRATES := visualsign visualsign-ethereum visualsign-solana visualsign-sui visualsign-tron visualsign-unspecified
 
 .PHONY: apple-silicon-check
 apple-silicon-check:
 	@# Any build script that compiles C calls the C compiler; pointing it at
 	@# `false` turns a C dependency into a build failure. Run on an Apple
 	@# Silicon macOS host (CI: macos-latest), which also runs the tests natively.
-	CC=/usr/bin/false CXX=/usr/bin/false cargo build --lib --target aarch64-apple-ios $(addprefix -p ,$(APPLE_NO_C_CRATES))
-	cargo test --no-fail-fast $(addprefix -p ,$(APPLE_NO_C_CRATES))
+	CC=/usr/bin/false CXX=/usr/bin/false cargo build --no-default-features --lib --target aarch64-apple-ios $(addprefix -p ,$(APPLE_NO_C_CRATES))
+	cargo test --no-default-features --no-fail-fast $(addprefix -p ,$(APPLE_NO_C_CRATES))
 
 .PHONY: narrow-build-check
 narrow-build-check:

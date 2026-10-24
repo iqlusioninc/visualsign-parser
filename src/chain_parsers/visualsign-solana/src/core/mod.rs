@@ -93,6 +93,7 @@ pub struct VisualizerContext<'a> {
     /// `SignV1`/`SignV2` payloads) must increment this when building a child
     /// context, so the recursion can be bounded at the trait boundary.
     call_depth: usize,
+    confidential_decoded_amount: Option<u64>,
 }
 
 impl<'a> VisualizerContext<'a> {
@@ -110,6 +111,7 @@ impl<'a> VisualizerContext<'a> {
             idl_registry,
             instruction_index,
             call_depth: 0,
+            confidential_decoded_amount: None,
         }
     }
 
@@ -129,6 +131,17 @@ impl<'a> VisualizerContext<'a> {
     pub fn with_call_depth(mut self, call_depth: usize) -> Self {
         self.call_depth = call_depth;
         self
+    }
+
+    /// Wallet-supplied UI hint in base units; never used by policy decoding.
+    #[must_use]
+    pub fn with_confidential_decoded_amount(mut self, amount: Option<u64>) -> Self {
+        self.confidential_decoded_amount = amount;
+        self
+    }
+
+    pub fn confidential_decoded_amount(&self) -> Option<u64> {
+        self.confidential_decoded_amount
     }
 
     pub fn idl_registry(&self) -> &crate::idl::IdlRegistry {

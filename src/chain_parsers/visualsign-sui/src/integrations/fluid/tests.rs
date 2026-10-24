@@ -269,7 +269,7 @@ fn visualize(
 }
 
 fn card(tx: &TransactionData, command_index: usize) -> AnnotatedPayloadField {
-    visualize(&tx, command_index).unwrap().remove(0)
+    visualize(tx, command_index).unwrap().remove(0)
 }
 
 fn preview_layout(field: &AnnotatedPayloadField) -> &SignablePayloadFieldPreviewLayout {
@@ -479,7 +479,7 @@ fn payment_remainder_joined_into_an_output_sent_elsewhere_is_shown() {
     let mut tx = fixture_tx(REMAINDER_DEPOSIT_DIGEST);
     set_pure_input(&mut tx, REMAINDER_RECIPIENT_INPUT, OTHER_ADDRESS.to_vec());
 
-    let field = card(tx, REMAINDER_OPERATE_COMMAND);
+    let field = card(&tx, REMAINDER_OPERATE_COMMAND);
     assert_eq!(
         field_value(&field, "SUI Recipient Also Receives"),
         "what remains of 0.1 SUI split from the gas coin"
@@ -488,7 +488,7 @@ fn payment_remainder_joined_into_an_output_sent_elsewhere_is_shown() {
 
 #[test]
 fn payment_remainder_returned_to_the_signer_adds_no_row() {
-    let field = card(
+    let field = card(&
         fixture_tx(REMAINDER_DEPOSIT_DIGEST),
         REMAINDER_OPERATE_COMMAND,
     );
@@ -534,7 +534,7 @@ fn funds_joined_into_an_output_are_shown() {
     );
     set_pure_input(&mut tx, COL_RECIPIENT_INPUT, OTHER_ADDRESS.to_vec());
 
-    let field = card(tx, OPERATE_COMMAND);
+    let field = card(&tx, OPERATE_COMMAND);
     assert_eq!(field_value(&field, "SUI Recipient"), other_address());
     assert_eq!(
         field_value(&field, "SUI Recipient Also Receives"),
@@ -575,7 +575,7 @@ fn balance_with_funds_added_before_the_output_joins_it_shows_every_addition() {
     move_call(&mut tx, 15).arguments[0] = result(9);
     set_pure_input(&mut tx, COL_RECIPIENT_INPUT, OTHER_ADDRESS.to_vec());
 
-    let field = card(tx, OPERATE_COMMAND);
+    let field = card(&tx, OPERATE_COMMAND);
     assert_eq!(
         field_value(&field, "SUI Recipient Also Receives"),
         "0.1 SUI split from the gas coin plus 5 SUI split from the gas coin"
@@ -598,7 +598,7 @@ fn merged_coin_joined_into_the_output_shows_the_merge() {
     );
     set_pure_input(&mut tx, COL_RECIPIENT_INPUT, OTHER_ADDRESS.to_vec());
 
-    let field = card(tx, OPERATE_COMMAND);
+    let field = card(&tx, OPERATE_COMMAND);
     assert_eq!(
         field_value(&field, "SUI Recipient Also Receives"),
         "1 SUI split from the gas coin plus 5 SUI split from the gas coin"
@@ -623,7 +623,7 @@ fn merged_coin_sent_with_the_cap_shows_the_merge() {
     objects.push(one);
     set_pure_input(&mut tx, CAP_RECIPIENT_INPUT, OTHER_ADDRESS.to_vec());
 
-    let field = card(tx, OPERATE_COMMAND);
+    let field = card(&tx, OPERATE_COMMAND);
     assert_eq!(
         field_value(&field, "Position Owner Also Receives"),
         "1 SUI split from the gas coin plus 5 SUI split from the gas coin"
@@ -643,7 +643,7 @@ fn coin_changed_by_an_unknown_call_shows_no_amount() {
     objects.push(one);
     set_pure_input(&mut tx, CAP_RECIPIENT_INPUT, OTHER_ADDRESS.to_vec());
 
-    let field = card(tx, OPERATE_COMMAND);
+    let field = card(&tx, OPERATE_COMMAND);
     assert_eq!(
         field_value(&field, "Position Owner Also Receives"),
         "1 SUI split from the gas coin, changed by later commands (amount not in transaction)"
@@ -674,7 +674,7 @@ fn coin_both_split_and_merged_shows_no_amount() {
     objects.push(one);
     set_pure_input(&mut tx, CAP_RECIPIENT_INPUT, OTHER_ADDRESS.to_vec());
 
-    let field = card(tx, OPERATE_COMMAND);
+    let field = card(&tx, OPERATE_COMMAND);
     assert_eq!(
         field_value(&field, "Position Owner Also Receives"),
         "1 SUI split from the gas coin, changed by later commands (amount not in transaction)"
@@ -684,7 +684,7 @@ fn coin_both_split_and_merged_shows_no_amount() {
 #[test]
 fn both_operates_in_one_transaction_render() {
     for command in [9, 21] {
-        let field = card(fixture_tx(TWO_OPERATES_DIGEST), command);
+        let field = card(&fixture_tx(TWO_OPERATES_DIGEST), command);
         assert_eq!(card_title(&field), "Deposit 0.3 SUI collateral on Fluid");
     }
 }
@@ -698,7 +698,7 @@ fn caps_sent_together_to_someone_else_are_shown() {
         OTHER_ADDRESS.to_vec(),
     );
 
-    let field = card(tx, 9);
+    let field = card(&tx, 9);
     assert_eq!(field_value(&field, "Position Owner"), other_address());
     assert_eq!(
         field_value(&field, "Position Owner Also Receives"),
@@ -715,7 +715,7 @@ fn object_sent_with_the_cap_is_shown_only_when_it_leaves_the_signer() {
         panic!("expected the cap transfer");
     };
     objects.push(Argument::GasCoin);
-    let to_signer = card(tx.clone(), OPERATE_COMMAND);
+    let to_signer = card(&tx, OPERATE_COMMAND);
     assert!(
         condensed_labels(&to_signer)
             .iter()
@@ -723,7 +723,7 @@ fn object_sent_with_the_cap_is_shown_only_when_it_leaves_the_signer() {
     );
 
     set_pure_input(&mut tx, CAP_RECIPIENT_INPUT, OTHER_ADDRESS.to_vec());
-    let to_other = card(tx, OPERATE_COMMAND);
+    let to_other = card(&tx, OPERATE_COMMAND);
     assert_eq!(
         field_value(&to_other, "Position Owner Also Receives"),
         "the gas coin's whole balance"
@@ -744,7 +744,7 @@ fn cap_sent_with_public_transfer_is_followed() {
     );
     set_pure_input(&mut tx, CAP_RECIPIENT_INPUT, OTHER_ADDRESS.to_vec());
 
-    let field = card(tx, OPERATE_COMMAND);
+    let field = card(&tx, OPERATE_COMMAND);
     assert_eq!(field_value(&field, "Position Owner"), other_address());
 }
 

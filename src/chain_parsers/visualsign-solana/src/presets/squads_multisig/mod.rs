@@ -9,9 +9,7 @@ use crate::core::{
 use config::SquadsMultisigConfig;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_parser::solana::structs::SolanaAccount;
-use solana_parser::{
-    Idl, SolanaParsedInstructionData, decode_idl_data,
-};
+use solana_parser::{Idl, SolanaParsedInstructionData, decode_idl_data};
 use solana_pubkey::Pubkey;
 use std::collections::BTreeMap;
 use std::str::FromStr;

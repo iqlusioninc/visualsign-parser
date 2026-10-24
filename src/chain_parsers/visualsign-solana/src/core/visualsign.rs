@@ -1,5 +1,5 @@
 use crate::core::txtypes::{
-    create_address_lookup_table_field, decode_v0_instructions, decode_v0_transfers,
+    create_address_lookup_table_field, decode_v0_instructions_with_hints, decode_v0_transfers,
 };
 use crate::core::{
     TransactionSummary, create_accounts_advanced_preview_layout, decode_accounts,
@@ -19,6 +19,7 @@ use solana_transaction::Transaction as SolanaTransaction;
 use solana_transaction::versioned::VersionedTransaction;
 use std::collections::BTreeMap;
 use std::str::FromStr;
+use visualsign::field_builders::create_text_field;
 use visualsign::signing::SignerAllowlist;
 use visualsign::{
     SignablePayload, SignablePayloadField, SignablePayloadFieldCommon,
@@ -84,10 +85,155 @@ fn append_diagnostics(
 pub enum SolanaTransactionWrapper {
     Legacy(SolanaTransaction),
     Versioned(VersionedTransaction),
+    /// An off-chain message under the raw-bytes `signMessage` convention that
+    /// Solana wallets use: the signature covers the message's UTF-8 bytes with
+    /// no header, so what renders here has to be exactly what gets signed. The
+    /// envelope also names the signing address, which renders but is not part
+    /// of the signed bytes.
+    ///
+    /// Solana's off-chain message standard (`solana-offchain-message`) prefixes
+    /// a header that starts with the `\xffsolana offchain` signing domain. Such a
+    /// message never reaches this variant: the envelope carries the message as
+    /// a JSON string, which decodes to valid UTF-8, and a `0xff` byte is not.
+    Message(OffChainMessage),
+}
+
+/// An off-chain message envelope, after the fields are lifted out.
+///
+/// `signer_address` is the caller's claimed signing key, checked only for a
+/// valid Solana address here. This parser has no signing key and does not bind
+/// the claim to one. Before approving or signing, the consuming wallet must
+/// compare it with the selected signing key and sign exactly `message.as_bytes()`.
+/// The envelope address itself is not included in those signed bytes.
+#[derive(Clone, Debug)]
+pub struct OffChainMessage {
+    pub message: String,
+    pub signer_address: String,
+}
+
+/// Decodes `{"message": ..., "signerAddress": ...}`. The envelope exists only to
+/// tell a message apart from a transaction on a wire that carries both.
+///
+/// Unknown fields are refused rather than ignored: an envelope carrying
+/// something this build does not understand is not one it can claim to have
+/// rendered in full. A repeated field is refused the same way: a JSON object
+/// with the same key twice has no single value to render, so accepting
+/// whichever one a generic parser happened to keep would let a signer approve
+/// a message that was never the one shown. A `signerAddress` that is not a
+/// Solana address is refused, since no key could sign as it.
+impl<'de> serde::Deserialize<'de> for OffChainMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct EnvelopeVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for EnvelopeVisitor {
+            type Value = OffChainMessage;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a Solana off-chain message envelope")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut message: Option<String> = None;
+                let mut signer_address: Option<String> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "message" if message.is_none() => message = Some(map.next_value()?),
+                        "signerAddress" if signer_address.is_none() => {
+                            signer_address = Some(map.next_value()?);
+                        }
+                        "message" | "signerAddress" => {
+                            return Err(serde::de::Error::custom(format!(
+                                "duplicate field {key:?}"
+                            )));
+                        }
+                        other => {
+                            return Err(serde::de::Error::custom(format!(
+                                "unexpected field {other:?}"
+                            )));
+                        }
+                    }
+                }
+                let message = message
+                    .ok_or_else(|| serde::de::Error::custom("envelope has no message field"))?;
+                let signer_address = signer_address.ok_or_else(|| {
+                    serde::de::Error::custom("envelope has no signerAddress field")
+                })?;
+                Pubkey::from_str(&signer_address).map_err(|_| {
+                    serde::de::Error::custom("signerAddress is not a Solana address")
+                })?;
+                Ok(OffChainMessage {
+                    message,
+                    signer_address,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(EnvelopeVisitor)
+    }
+}
+
+/// Escape what cannot render, rather than dropping it or collapsing it.
+///
+/// `core::arg_rendering`'s `charset_safe` filters unrenderable characters out,
+/// which is safe for an argument preview but not for text a signer approves:
+/// dropping lets two different messages render identically. Replacing them with
+/// a single marker character fails the same way less obviously, because the
+/// marker is itself renderable: a literal `?` collides with anything replaced
+/// by `?`.
+///
+/// Escaping is reversible, so distinct messages stay distinct. The escape is
+/// percent-encoding of the character's UTF-8 bytes (`%0A` for a line feed), and
+/// a literal `%` is escaped too (`%25`), or a message carrying one could forge an
+/// escape for a character it does not contain.
+///
+/// The escape uses no backslash. `SignablePayload::validate_charset` refuses a
+/// payload whose JSON contains `\u`, `\t`, `\r`, `\b`, `\f` or `\/`, and a
+/// backslash in field text serializes as `\\`, so a backslash escape (or a
+/// literal backslash followed by one of those letters) would get the whole
+/// message refused. A literal backslash is therefore percent-encoded as well.
+fn charset_escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut utf8 = [0u8; 4];
+    for c in text.chars() {
+        match c {
+            '%' | '\\' => {
+                let byte = c as u32;
+                out.push_str(&format!("%{byte:02X}"));
+            }
+            ' ' => out.push(' '),
+            c if c.is_ascii_graphic() => out.push(c),
+            c => {
+                for b in c.encode_utf8(&mut utf8).bytes() {
+                    out.push_str(&format!("%{b:02X}"));
+                }
+            }
+        }
+    }
+    out
 }
 
 impl Transaction for SolanaTransactionWrapper {
     fn from_string(data: &str) -> Result<Self, TransactionParseError> {
+        // A message envelope is JSON and a transaction is base64 or hex, so the
+        // two cannot collide: neither alphabet contains `{`. Tried first so a
+        // malformed envelope reports its own error rather than surfacing as a
+        // transaction decode failure.
+        let trimmed = data.trim();
+        if trimmed.starts_with('{') {
+            let envelope = serde_json::from_str::<OffChainMessage>(trimmed).map_err(|e| {
+                TransactionParseError::DecodeError(format!(
+                    "input is JSON but not a Solana message envelope: {e}"
+                ))
+            })?;
+            return Ok(Self::Message(envelope));
+        }
+
         // Detect if format is base64 or hex
         let format = visualsign::encodings::SupportedEncodings::detect(data);
 
@@ -159,6 +305,7 @@ impl Transaction for SolanaTransactionWrapper {
                 VersionedMessage::V0(_) => "Solana (V0)".to_string(),
                 VersionedMessage::V1(_) => "Solana (V1)".to_string(),
             },
+            Self::Message(_) => "Solana Message".to_string(),
         }
     }
 }
@@ -175,14 +322,21 @@ impl SolanaTransactionWrapper {
     pub fn inner_legacy(&self) -> Option<&SolanaTransaction> {
         match self {
             Self::Legacy(tx) => Some(tx),
-            Self::Versioned(_) => None,
+            Self::Versioned(_) | Self::Message(_) => None,
         }
     }
 
     pub fn inner_versioned(&self) -> Option<&VersionedTransaction> {
         match self {
-            Self::Legacy(_) => None,
             Self::Versioned(tx) => Some(tx),
+            Self::Legacy(_) | Self::Message(_) => None,
+        }
+    }
+
+    pub fn inner_message(&self) -> Option<&OffChainMessage> {
+        match self {
+            Self::Message(envelope) => Some(envelope),
+            Self::Legacy(_) | Self::Versioned(_) => None,
         }
     }
 }
@@ -389,6 +543,32 @@ fn create_idl_registry_from_options(
     }
 }
 
+/// Extract wallet-decoded ConfidentialTransfer amounts from `VisualSignOptions`
+/// metadata, keyed by instruction index.
+///
+/// UI-only: the wallet holds the viewing key and decrypts off-parser. These
+/// hints are surfaced to visualizer presets via `VisualizerContext` and must
+/// never be routed into `intermediate.rs` / the intermediate output used by
+/// the policy engine.
+fn confidential_transfer_hints(
+    options: &VisualSignOptions,
+) -> std::collections::BTreeMap<u32, u64> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(generated::parser::chain_metadata::Metadata::Solana(solana_meta)) = options
+        .metadata
+        .as_ref()
+        .and_then(|meta| meta.metadata.as_ref())
+    else {
+        return out;
+    };
+    for (idx, hint) in &solana_meta.confidential_transfer_hints {
+        if let Some(amount) = hint.decoded_amount {
+            out.insert(*idx, amount);
+        }
+    }
+    out
+}
+
 /// Converter that knows how to format Solana transactions for VisualSign
 pub struct SolanaVisualSignConverter;
 
@@ -432,21 +612,33 @@ impl VisualSignConverter<SolanaTransactionWrapper> for SolanaVisualSignConverter
         // independent decoders. Instruction-level fields are not yet a
         // projection of this decode -- they still go through
         // `decode_instructions`/`decode_v0_instructions`, an independent
-        // decoder over `solana_sdk` message types.
+        // decoder over split Anza message types.
         //
         // When the caller does not ask for intermediate output we skip the
         // serialize + decode entirely, so the default signing path pays nothing
         // and its bytes stay identical to the pre-feature path.
-        let intermediate_inputs = if options.include_intermediate_output {
+        let intermediate_inputs = if options.include_intermediate_output
+            && !matches!(&transaction_wrapper, SolanaTransactionWrapper::Message(_))
+        {
             // Deferred to here (rather than the payload match below) so the
             // default path never pays for a blob it does not read.
             let message_hex = match &transaction_wrapper {
                 SolanaTransactionWrapper::Legacy(transaction) => {
-                    hex::encode(transaction.message.serialize())
+                    hex::encode(bincode::serialize(&transaction.message).map_err(|e| {
+                        VisualSignError::ParseError(TransactionParseError::DecodeError(format!(
+                            "Failed to serialize message: {e}"
+                        )))
+                    })?)
                 }
                 SolanaTransactionWrapper::Versioned(versioned_tx) => {
-                    hex::encode(versioned_tx.message.serialize())
+                    hex::encode(bincode::serialize(&versioned_tx.message).map_err(|e| {
+                        VisualSignError::ParseError(TransactionParseError::DecodeError(format!(
+                            "Failed to serialize message: {e}"
+                        )))
+                    })?)
                 }
+                // Off-chain messages never enter the structured transaction decoder.
+                SolanaTransactionWrapper::Message(_) => String::new(),
             };
             let idl_registry = create_idl_registry_from_options(&options)?;
             let raw_simulated_instructions =
@@ -492,6 +684,9 @@ impl VisualSignConverter<SolanaTransactionWrapper> for SolanaVisualSignConverter
                     #[cfg(feature = "diagnostics")]
                     &lint_config,
                 )?
+            }
+            SolanaTransactionWrapper::Message(envelope) => {
+                message_to_visual_sign_payload(envelope, &options)?
             }
         };
 
@@ -633,6 +828,7 @@ fn convert_to_visual_sign_payload(
 
     // Create IDL registry from options metadata
     let idl_registry = create_idl_registry_from_options(options)?;
+    let hints = confidential_transfer_hints(options);
 
     let mut fields = vec![SignablePayloadField::TextV2 {
         common: SignablePayloadFieldCommon {
@@ -663,7 +859,12 @@ fn convert_to_visual_sign_payload(
 
     // Process instructions with visualizers
     #[cfg(feature = "diagnostics")]
-    let decode_result = instructions::decode_instructions(transaction, &idl_registry, lint_config);
+    let decode_result = instructions::decode_instructions_with_hints(
+        transaction,
+        &hints,
+        &idl_registry,
+        lint_config,
+    );
     #[cfg(feature = "diagnostics")]
     fields.extend(
         decode_result
@@ -677,7 +878,8 @@ fn convert_to_visual_sign_payload(
 
     #[cfg(not(feature = "diagnostics"))]
     let summary = {
-        let decoded = instructions::decode_instructions(transaction, &idl_registry)?;
+        let decoded =
+            instructions::decode_instructions_with_hints(transaction, &hints, &idl_registry)?;
         fields.extend(
             decoded
                 .fields
@@ -742,6 +944,59 @@ fn apply_transaction_summary(
     fields.splice(after_network..after_network, rows);
     Ok((summary.title, summary.subtitle))
 }
+
+/// Render an off-chain message.
+///
+/// The text is charset-escaped before it renders: it is caller-supplied and
+/// reaches a signer's screen, where an unescaped line separator could forge a
+/// second field.
+#[cfg_attr(not(feature = "intents"), allow(unused_variables))]
+fn message_to_visual_sign_payload(
+    envelope: &OffChainMessage,
+    options: &VisualSignOptions,
+) -> Result<SignablePayload, VisualSignError> {
+    // A message carrying NEAR Intents renders the intents. A signer approving a
+    // token movement has to see the movement, not the JSON that encodes it.
+    //
+    // The envelope's address renders here too: it names the Solana key that
+    // will produce the signature, which the intents alone do not show. It is
+    // labelled "Signing Address" because the intents already render a "Signer"
+    // field, the payload's `signer_id`, which is a NEAR account rather than the
+    // key that signs.
+    #[cfg(feature = "intents")]
+    if let Some(rendered) = crate::intents::try_render(envelope.message.as_bytes(), options)? {
+        let mut fields = rendered.fields;
+        fields.push(
+            create_text_field("Signing Address", &envelope.signer_address)?.signable_payload_field,
+        );
+        return Ok(SignablePayload::new(
+            0,
+            rendered.title,
+            None,
+            fields,
+            MESSAGE_PAYLOAD_TYPE.to_string(),
+        ));
+    }
+    Ok(SignablePayload::new(
+        0,
+        "Solana Message".to_string(),
+        None,
+        vec![
+            create_text_field("Message", &charset_escaped(&envelope.message))?
+                .signable_payload_field,
+            // Not escaped: decoding already refused anything that is not a base58
+            // Solana address, and base58 has no character that needs escaping.
+            create_text_field("Signer", &envelope.signer_address)?.signable_payload_field,
+        ],
+        MESSAGE_PAYLOAD_TYPE.to_string(),
+    ))
+}
+
+/// `payload_type` for an off-chain message: what the signature covers is a
+/// message, not a transaction, whatever the message carries. Transactions keep
+/// `"SolanaTx"`. See "payload_type names the chain and what is signed" in
+/// CLAUDE.md.
+const MESSAGE_PAYLOAD_TYPE: &str = "SolanaMessage";
 
 /// Convert versioned Solana transaction to visual sign payload
 fn convert_versioned_to_visual_sign_payload(
@@ -813,6 +1068,7 @@ fn convert_v0_to_visual_sign_payload(
 
     // Create IDL registry from options metadata
     let idl_registry = create_idl_registry_from_options(options)?;
+    let hints = confidential_transfer_hints(options);
 
     // Decode and sort accounts using the dedicated function
     let accounts = decode_v0_accounts(v0_message)?;
@@ -836,7 +1092,8 @@ fn convert_v0_to_visual_sign_payload(
     // Directly process V0 instructions using the visualizer framework
     // This approach works for all V0 transactions, including those with lookup tables
     #[cfg(feature = "diagnostics")]
-    let v0_result = decode_v0_instructions(v0_message, &idl_registry, lint_config);
+    let v0_result =
+        decode_v0_instructions_with_hints(v0_message, &hints, &idl_registry, lint_config);
     #[cfg(feature = "diagnostics")]
     for (index, instruction_field) in v0_result.fields.iter().enumerate() {
         tracing::debug!(
@@ -850,7 +1107,7 @@ fn convert_v0_to_visual_sign_payload(
     let summary = v0_result.summary.clone();
 
     #[cfg(not(feature = "diagnostics"))]
-    let summary = match decode_v0_instructions(v0_message, &idl_registry) {
+    let summary = match decode_v0_instructions_with_hints(v0_message, &hints, &idl_registry) {
         Ok(decoded) => {
             for (index, instruction_field) in decoded.fields.iter().enumerate() {
                 tracing::debug!(
@@ -962,6 +1219,102 @@ mod tests {
             .map(|r| r.payload)
     }
 
+    #[test]
+    fn confidential_hints_are_base_units_and_never_change_policy_bytes() {
+        let keys: Vec<solana_pubkey::Pubkey> = (1..=7)
+            .map(|seed| solana_pubkey::Pubkey::new_from_array([seed; 32]))
+            .collect();
+        let mut data = vec![27, 7];
+        data.extend_from_slice(&[0; 167]);
+        let instruction = Instruction {
+            program_id: spl_token_2022_interface::id(),
+            accounts: keys
+                .iter()
+                .enumerate()
+                .map(|(index, key)| AccountMeta::new_readonly(*key, index == 6))
+                .collect(),
+            data,
+        };
+        let legacy = solana_transaction::Transaction::new_unsigned(Message::new(
+            std::slice::from_ref(&instruction),
+            Some(&keys[6]),
+        ));
+        let v0 = solana_message::v0::Message::try_compile(
+            &keys[6],
+            &[instruction],
+            &[],
+            solana_hash::Hash::default(),
+        )
+        .unwrap();
+        let wrappers = [
+            SolanaTransactionWrapper::Legacy(legacy.clone()),
+            SolanaTransactionWrapper::Versioned(
+                solana_transaction::versioned::VersionedTransaction {
+                    signatures: legacy.signatures,
+                    message: VersionedMessage::Legacy(legacy.message),
+                },
+            ),
+            SolanaTransactionWrapper::Versioned(
+                solana_transaction::versioned::VersionedTransaction {
+                    signatures: vec![solana_signature::Signature::default()],
+                    message: VersionedMessage::V0(v0),
+                },
+            ),
+        ];
+        for wrapper in wrappers {
+            let mut baseline = None;
+            for hint in [None, Some(1_500_000), Some(2_000_000)] {
+                let hints = hint
+                    .map(|amount| {
+                        (
+                            0,
+                            generated::parser::SolanaConfidentialTransferHint {
+                                decoded_amount: Some(amount),
+                            },
+                        )
+                    })
+                    .into_iter()
+                    .collect();
+                let options = VisualSignOptions {
+                    include_intermediate_output: true,
+                    metadata: Some(generated::parser::ChainMetadata {
+                        metadata: Some(generated::parser::chain_metadata::Metadata::Solana(
+                            generated::parser::SolanaMetadata {
+                                confidential_transfer_hints: hints,
+                                ..Default::default()
+                            },
+                        )),
+                    }),
+                    ..VisualSignOptions::default()
+                };
+                let result = SolanaVisualSignConverter
+                    .to_visual_sign_payload(wrapper.clone(), options)
+                    .unwrap();
+                let text = serde_json::to_string(&result.payload).unwrap();
+                if let Some(amount) = hint {
+                    assert!(
+                        text.contains(&format!("{amount} base units (wallet supplied)")),
+                        "{text}"
+                    );
+                    assert!(!text.contains(&format!("{amount} tokens")), "{text}");
+                } else {
+                    assert!(!text.contains("wallet supplied"), "{text}");
+                }
+                let bytes = result.intermediate_output.unwrap();
+                let policy: SolanaIntermediateOutput = borsh::from_slice(&bytes).unwrap();
+                assert!(matches!(
+                    policy.instructions[0].confidential_transfer,
+                    Some(crate::intermediate::ConfidentialTransferIo::Transfer { .. })
+                ));
+                if let Some(expected) = &baseline {
+                    assert_eq!(&bytes, expected, "UI hint changed policy bytes");
+                } else {
+                    baseline = Some(bytes);
+                }
+            }
+        }
+    }
+
     /// End-to-end exercise of the opt-in intermediate-output path: a known
     /// Solana System Program transfer is converted with
     /// `include_intermediate_output: true`, the emitted borsh bytes are decoded
@@ -1050,6 +1403,7 @@ mod tests {
                         network_id: None,
                         idl: None,
                         idl_mappings: Default::default(),
+                confidential_transfer_hints: Default::default(),
                         simulated_transaction_result: Some(
                             base64::engine::general_purpose::STANDARD.encode(
                                 serde_json::json!({
@@ -2561,6 +2915,7 @@ mod tests {
                         network_id: Some("SOLANA_MAINNET".to_string()),
                         idl: None,
                         idl_mappings: idl_mappings.into_iter().collect(),
+                        confidential_transfer_hints: Default::default(),
                         simulated_transaction_result: None,
                     },
                 )),
@@ -2620,21 +2975,21 @@ mod tests {
         assert_eq!(extract_idl_mappings(&options).len(), 1);
 
         let message = Message {
-            header: solana_sdk::message::MessageHeader {
+            header: solana_message::MessageHeader {
                 num_required_signatures: 1,
                 num_readonly_signed_accounts: 0,
                 num_readonly_unsigned_accounts: 1,
             },
             account_keys: vec![fee_payer, program_id],
-            recent_blockhash: solana_sdk::hash::Hash::new_unique(),
-            instructions: vec![solana_sdk::instruction::CompiledInstruction {
+            recent_blockhash: solana_hash::Hash::new_unique(),
+            instructions: vec![solana_message::compiled_instruction::CompiledInstruction {
                 program_id_index: 1,
                 accounts: vec![0],
                 data: vec![1],
             }],
         };
         let transaction = SolanaTransaction {
-            signatures: vec![solana_sdk::signature::Signature::default()],
+            signatures: vec![solana_signature::Signature::default()],
             message,
         };
 
@@ -2999,5 +3354,404 @@ mod tests {
         assert_eq!(title, "Caller");
         assert_eq!(subtitle, None);
         assert_eq!(fields.len(), 1);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod solana_message_tests {
+    use super::*;
+
+    fn render(envelope: &str) -> SignablePayload {
+        SolanaVisualSignConverter
+            .to_visual_sign_payload(
+                SolanaTransactionWrapper::from_string(envelope).expect("decode"),
+                VisualSignOptions::default(),
+            )
+            .expect("convert")
+            .payload
+    }
+
+    /// A signer address the envelope needs but the case under test does not
+    /// vary. Base58, 32 bytes, so a renderer treating the value as an address
+    /// has nothing to object to.
+    const SIGNER: &str = "BxrKzfvmQYjgFUzQwiNErgJabbrdqp6Ggci7h7q86naT";
+
+    /// A well-formed envelope around one message. The message is embedded as
+    /// written, so a case needing a JSON escape passes the escape.
+    fn envelope(message: &str) -> String {
+        format!(r#"{{"message":"{message}","signerAddress":"{SIGNER}"}}"#)
+    }
+
+    fn render_message(message: &str) -> SignablePayload {
+        render(&envelope(message))
+    }
+
+    fn field_text(payload: &SignablePayload, label: &str) -> String {
+        payload
+            .fields
+            .iter()
+            .find_map(|f| match f {
+                SignablePayloadField::TextV2 { common, text_v2 } if common.label == label => {
+                    Some(text_v2.text.clone())
+                }
+                _ => None,
+            })
+            // A static message: CodeQL reads a panic as a log sink and treats
+            // anything derived from the rendered payload as tainted, a length
+            // included, so the label is not interpolated.
+            .expect("no field with the requested label")
+    }
+
+    fn message_text(payload: &SignablePayload) -> String {
+        field_text(payload, "Message")
+    }
+
+    #[test]
+    fn message_envelope_decodes_as_a_message() {
+        let tx = SolanaTransactionWrapper::from_string(&envelope("Sign in to app.example.com"))
+            .expect("decode");
+        let envelope = tx.inner_message().expect("a message envelope");
+        assert_eq!(envelope.message, "Sign in to app.example.com");
+        assert_eq!(envelope.signer_address, SIGNER);
+        assert_eq!(tx.transaction_type(), "Solana Message");
+        assert!(tx.inner_legacy().is_none() && tx.inner_versioned().is_none());
+    }
+
+    /// An off-chain message has no transaction for an intermediate output to
+    /// describe, so opting in must emit none, and must not change the payload:
+    /// a policy engine reading a blob here would treat a message as having
+    /// instructions.
+    #[test]
+    fn a_message_never_emits_intermediate_output() {
+        let options = VisualSignOptions {
+            include_intermediate_output: true,
+            decode_transfers: true,
+            ..VisualSignOptions::default()
+        };
+        let result = SolanaVisualSignConverter
+            .to_visual_sign_payload(
+                SolanaTransactionWrapper::from_string(&envelope("Sign in to app.example.com"))
+                    .expect("decode"),
+                options,
+            )
+            .expect("convert with intermediate output opted in");
+
+        assert!(
+            result.intermediate_output.is_none(),
+            "a message must not carry an intermediate output"
+        );
+        assert_eq!(
+            serde_json::to_string(&result.payload).expect("serialize"),
+            serde_json::to_string(&render_message("Sign in to app.example.com"))
+                .expect("serialize"),
+            "opting in must not change what a message renders"
+        );
+    }
+
+    /// A transaction is base64 or hex and an envelope is JSON, so neither
+    /// alphabet can produce the other. The transaction path must be untouched.
+    #[test]
+    fn a_transaction_still_decodes_as_a_transaction() {
+        // A minimal legacy transaction: one signature, an empty message body.
+        let tx_b64 = "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let decoded = SolanaTransactionWrapper::from_string(tx_b64)
+            .expect("a valid base64 transaction must still decode");
+        assert!(
+            decoded.inner_message().is_none(),
+            "base64 input must never be read as a message envelope"
+        );
+    }
+
+    /// An envelope carrying a field this build does not understand has not been
+    /// rendered in full, so it is refused rather than partially shown.
+    #[test]
+    fn unknown_envelope_fields_are_refused() {
+        let result = SolanaTransactionWrapper::from_string(&format!(
+            r#"{{"message":"hi","signerAddress":"{SIGNER}","extra":1}}"#
+        ));
+        let Err(TransactionParseError::DecodeError(message)) = result else {
+            panic!("expected a DecodeError for an unknown field");
+        };
+        assert!(
+            message.contains("extra"),
+            "the refusal must name the field: {message}"
+        );
+    }
+
+    /// A JSON object with the same key twice has no single value to render. A
+    /// generic parser resolves it to whichever value it happened to keep,
+    /// which would let a signer approve a message that was never the one
+    /// shown, so it is refused rather than silently resolved.
+    #[test]
+    fn duplicate_envelope_fields_are_refused() {
+        let result = SolanaTransactionWrapper::from_string(&format!(
+            r#"{{"message":"A","message":"B","signerAddress":"{SIGNER}"}}"#
+        ));
+        let Err(TransactionParseError::DecodeError(message)) = result else {
+            panic!("expected a DecodeError for a duplicate field");
+        };
+        assert!(
+            message.contains("message"),
+            "the refusal must name the field: {message}"
+        );
+    }
+
+    #[test]
+    fn message_renders_as_text() {
+        let payload = render_message("Sign in to app.example.com");
+        assert_eq!(payload.title, "Solana Message");
+        assert_eq!(payload.payload_type, "SolanaMessage");
+        assert_eq!(message_text(&payload), "Sign in to app.example.com");
+    }
+
+    /// The text is caller-supplied and reaches a signer's screen, so a character
+    /// that could forge a line break is escaped.
+    #[test]
+    fn message_text_escapes_what_cannot_render() {
+        let payload = render_message(r"innocent\nTo: attacker.sol");
+        assert_eq!(message_text(&payload), "innocent%0ATo: attacker.sol");
+    }
+
+    /// Escaping rather than deleting is what keeps two different messages from
+    /// rendering identically -- a signer comparing them has to be able to tell
+    /// them apart.
+    #[test]
+    fn distinct_messages_stay_distinct() {
+        let with_break = message_text(&render_message(r"innocent\nTo: attacker.sol"));
+        let without = message_text(&render_message("innocentTo: attacker.sol"));
+        assert_ne!(with_break, without);
+
+        // A single marker character cannot carry this. The marker is itself
+        // renderable, so a message containing one literally would render the
+        // same as one whose separator was replaced by it.
+        let literal_marker = message_text(&render_message("innocent?To: attacker.sol"));
+        assert_ne!(with_break, literal_marker);
+    }
+
+    /// A message carrying a literal `%` must not be able to produce the same
+    /// render as one carrying the character that escape stands for.
+    #[test]
+    fn a_literal_percent_cannot_forge_an_escape() {
+        let forged = message_text(&render_message("a%0Ab"));
+        let real = message_text(&render_message(r"a\nb"));
+        assert_eq!(real, "a%0Ab");
+        assert_eq!(forged, "a%250Ab");
+        assert_ne!(forged, real);
+    }
+
+    /// Non-ASCII text escapes byte by byte, so it stays reversible.
+    #[test]
+    fn non_ascii_escapes_as_utf8_bytes() {
+        // The envelope embeds the message as written, so this is the JSON
+        // escape for U+00E9.
+        let payload = render_message(r"caf\u00e9");
+        assert_eq!(message_text(&payload), "caf%C3%A9");
+    }
+
+    /// Every rendered message must survive the payload charset validation the
+    /// parser runs before returning a payload. The validator refuses JSON
+    /// containing backslash escapes such as `\u` or `\t`, so an escape that
+    /// used a backslash, or a literal backslash passed through, would get the
+    /// whole message refused rather than shown.
+    #[test]
+    fn rendered_messages_pass_charset_validation() {
+        for message in [
+            "plain text",
+            r"line\nbreak",
+            r"tab\there",
+            r"carriage\rreturn",
+            r"backslash \\u0041 and \\/ and \\t",
+            "50% off",
+            r"caf\u00e9 \u202e \ud83d\ude00",
+            r#"quote \" inside"#,
+        ] {
+            render_message(message)
+                .validate_charset()
+                .unwrap_or_else(|e| panic!("message {message:?} was refused: {e}"));
+        }
+    }
+
+    /// The signer address renders alongside the message. The enclave compares
+    /// the address against the key it signs with, so a signer reading the
+    /// screen can tell which of their addresses produces the signature.
+    #[test]
+    fn the_signer_address_renders() {
+        let payload = render_message("Sign in to app.example.com");
+        assert_eq!(field_text(&payload, "Signer"), SIGNER);
+    }
+
+    /// An envelope naming no signer is refused rather than rendered without
+    /// one: a signer screen missing the address cannot show who signs.
+    #[test]
+    fn an_envelope_with_no_signer_is_refused() {
+        let result =
+            SolanaTransactionWrapper::from_string(r#"{"message":"Sign in to app.example.com"}"#);
+        let Err(TransactionParseError::DecodeError(message)) = result else {
+            panic!("expected a DecodeError for a missing signerAddress");
+        };
+        assert!(
+            message.contains("signerAddress"),
+            "the refusal must name the missing field: {message}"
+        );
+    }
+
+    /// The address reaches the same screen as the message. Anything that is not
+    /// a Solana address is refused at decode, so text posing as an address
+    /// (here, one that forges a second line) never reaches the screen.
+    #[test]
+    fn a_signer_that_is_not_an_address_is_refused() {
+        for bad in [r"addr\nSigner: attacker.sol", "x", ""] {
+            let result = SolanaTransactionWrapper::from_string(&format!(
+                r#"{{"message":"hi","signerAddress":"{bad}"}}"#
+            ));
+            let Err(TransactionParseError::DecodeError(message)) = result else {
+                panic!("expected a DecodeError for a non-address signer");
+            };
+            assert!(
+                message.contains("signerAddress"),
+                "the refusal must name the field: {message}"
+            );
+        }
+    }
+}
+
+#[cfg(all(test, feature = "intents"))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod solana_intents_message_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The Solana key that signs. Base58, 32 bytes.
+    const SIGNER: &str = "BxrKzfvmQYjgFUzQwiNErgJabbrdqp6Ggci7h7q86naT";
+
+    /// A `DefusePayload` withdrawing 1 wNEAR, as a Solana wallet signs it under
+    /// `raw_ed25519`: the payload is the message itself.
+    const INTENTS: &str = r#"{"signer_id":"alice.near","verifying_contract":"intents.near","deadline":"2999-01-01T00:00:00Z","nonce":"XVoKfmScb3G+XqH9ke/fSlJ/3xO59sNhCxhpG821BH8=","intents":[{"intent":"ft_withdraw","token":"wrap.near","receiver_id":"bob.near","amount":"1000000000000000000000000"}]}"#;
+
+    fn render(message: &str) -> SignablePayload {
+        let envelope = json!({ "message": message, "signerAddress": SIGNER }).to_string();
+        SolanaVisualSignConverter
+            .to_visual_sign_payload(
+                SolanaTransactionWrapper::from_string(&envelope).expect("decode"),
+                VisualSignOptions::default(),
+            )
+            .expect("convert")
+            .payload
+    }
+
+    fn labels(payload: &SignablePayload) -> Vec<String> {
+        payload
+            .fields
+            .iter()
+            .map(|f| f.label().to_string())
+            .collect()
+    }
+
+    fn field_text(payload: &SignablePayload, label: &str) -> String {
+        payload
+            .fields
+            .iter()
+            .find_map(|f| match f {
+                SignablePayloadField::TextV2 { common, text_v2 } if common.label == label => {
+                    Some(text_v2.text.clone())
+                }
+                _ => None,
+            })
+            // A static message: CodeQL treats anything derived from the payload
+            // as tainted, so the label is not interpolated.
+            .expect("no field with the requested label")
+    }
+
+    /// A message carrying intents renders as intents, and the Solana key that
+    /// will sign still shows. The intents' own "Signer" is the payload's NEAR
+    /// account, so the signing key needs its own field to be visible at all.
+    #[test]
+    fn intents_message_shows_the_signing_address() {
+        let payload = render(INTENTS);
+        let labels = labels(&payload);
+        assert!(
+            labels.iter().any(|l| l == "Intent"),
+            "not rendered as intents: {labels:?}"
+        );
+        assert_eq!(field_text(&payload, "Signing Address"), SIGNER);
+        assert_eq!(field_text(&payload, "Signer"), "alice.near");
+        // What the signature covers is a message, whatever it carries.
+        assert_eq!(payload.payload_type, "SolanaMessage");
+    }
+
+    /// The signing address appears once, after the intents' own fields.
+    #[test]
+    fn signing_address_is_the_last_field_and_appears_once() {
+        let labels = labels(&render(INTENTS));
+        assert_eq!(labels.iter().filter(|l| *l == "Signing Address").count(), 1);
+        assert_eq!(labels.last().map(String::as_str), Some("Signing Address"));
+    }
+
+    /// The parser validates the payload's charset before returning it, so the
+    /// intents render must pass that check with the extra field in place.
+    #[test]
+    fn intents_message_passes_charset_validation() {
+        render(INTENTS).validate_charset().expect("charset");
+    }
+
+    /// A message that is intents but carries an undeclared key is refused
+    /// rather than shown as text: the extra key would be signed without being
+    /// shown, and falling back to the raw JSON would show a payload the parser
+    /// partly understood.
+    #[test]
+    fn intents_with_an_undeclared_key_are_refused() {
+        let mut intents: serde_json::Value = serde_json::from_str(INTENTS).expect("json");
+        intents["memo"] = json!("hidden");
+        let envelope =
+            json!({ "message": intents.to_string(), "signerAddress": SIGNER }).to_string();
+        let result = SolanaVisualSignConverter.to_visual_sign_payload(
+            SolanaTransactionWrapper::from_string(&envelope).expect("decode"),
+            VisualSignOptions::default(),
+        );
+        let Err(err) = result else {
+            panic!("expected a refusal for an undeclared intents key");
+        };
+        assert!(err.to_string().contains("\"memo\""), "{err}");
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn intents_diagnostics_follow_the_solana_feature() {
+        let payload = render(&INTENTS.replace("2999-01-01", "2020-01-01"));
+        assert!(
+            payload.fields.iter().any(|field| matches!(field,
+                SignablePayloadField::Diagnostic { diagnostic, .. } if diagnostic.rule == "deadline"
+            )),
+            "expired intents did not emit structured diagnostics"
+        );
+    }
+
+    #[test]
+    fn malformed_intents_do_not_fall_back_to_plain_text() {
+        for message in [
+            INTENTS.replace("ft_withdraw", "future_unknown"),
+            INTENTS.replace("\"intents\":[", "\"intents\":null,\"unused\":["),
+        ] {
+            let envelope = json!({ "message": message, "signerAddress": SIGNER }).to_string();
+            let result = SolanaVisualSignConverter.to_visual_sign_payload(
+                SolanaTransactionWrapper::from_string(&envelope).expect("decode"),
+                VisualSignOptions::default(),
+            );
+            assert!(
+                result.is_err(),
+                "malformed intents rendered as ordinary text"
+            );
+        }
+    }
+
+    /// A message that is not intents still renders as text with its signer.
+    #[test]
+    fn a_plain_message_still_renders_as_text() {
+        for message in ["Sign in to app.example.com", r#"{"challenge":"42"}"#] {
+            let payload = render(message);
+            assert_eq!(payload.title, "Solana Message");
+            assert_eq!(field_text(&payload, "Signer"), SIGNER);
+        }
     }
 }

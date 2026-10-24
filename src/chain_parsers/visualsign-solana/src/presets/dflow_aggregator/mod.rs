@@ -11,7 +11,7 @@ use solana_parser::{Idl, SolanaParsedInstructionData, decode_idl_data};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use visualsign::errors::VisualSignError;
-use visualsign::field_builders::{create_raw_data_field, create_text_field};
+use visualsign::field_builders::{create_number_field, create_raw_data_field, create_text_field};
 use visualsign::{
     AnnotatedPayloadField, SignablePayloadField, SignablePayloadFieldCommon,
     SignablePayloadFieldListLayout, SignablePayloadFieldPreviewLayout, SignablePayloadFieldTextV2,
@@ -169,27 +169,56 @@ fn build_parsed_fields(
 
     condensed_fields.push(create_text_field("Program", "DFlow Aggregator")?);
     condensed_fields.push(create_text_field("Instruction", instruction_name)?);
-    for (key, value) in &parsed.program_call_args {
-        condensed_fields.push(create_text_field(key, &format_arg_value(value))?);
-    }
 
-    expanded_fields.push(create_text_field("Program ID", program_id)?);
-    expanded_fields.push(create_text_field("Instruction", instruction_name)?);
-    expanded_fields.push(create_text_field("Discriminator", &parsed.discriminator)?);
+    // `swap`/`swap2` get a DFlow-aware grouped layout: a route summary +
+    // economics in the condensed (at-a-glance) view; the expanded view holds
+    // collapsible "Swap Details" / "Route" / "Accounts" cards (each a nested
+    // `preview_layout` with a condensed summary + expanded detail -- the same
+    // inner-program pattern squads_multisig uses). A section that reduces to a
+    // single item is rendered as a plain field instead of a card. Other
+    // instructions keep the flat generic layout.
+    match parsed
+        .program_call_args
+        .iter()
+        .find_map(|(key, value)| as_swap_params(key, value))
+    {
+        Some(params) => {
+            if let Some(route) = route_summary(params) {
+                condensed_fields.push(create_text_field("Route", &route)?);
+            }
+            condensed_fields.extend(economics_fields(params)?);
 
-    for (account_name, account_address) in &instruction.named_accounts {
-        expanded_fields.push(create_text_field(account_name, account_address)?);
-    }
-
-    for (index, pubkey) in instruction.extra_accounts.iter().enumerate() {
-        expanded_fields.push(create_text_field(
-            &format!("Remaining Account {}", index + 1),
-            pubkey,
-        )?);
-    }
-
-    for (key, value) in &parsed.program_call_args {
-        expanded_fields.push(create_text_field(key, &format_arg_value(value))?);
+            expanded_fields.extend(swap_details_section(
+                program_id,
+                &parsed.discriminator,
+                params,
+            )?);
+            expanded_fields.extend(route_section(params)?);
+            expanded_fields.extend(accounts_section(
+                &instruction.named_accounts,
+                &instruction.extra_accounts,
+            )?);
+        }
+        None => {
+            expanded_fields.push(create_text_field("Program ID", program_id)?);
+            expanded_fields.push(create_text_field("Instruction", instruction_name)?);
+            expanded_fields.push(create_text_field("Discriminator", &parsed.discriminator)?);
+            for (key, value) in &parsed.program_call_args {
+                condensed_fields.push(create_text_field(key, &format_arg_value(value))?);
+            }
+            for (account_name, account_address) in &instruction.named_accounts {
+                expanded_fields.push(create_text_field(account_name, account_address)?);
+            }
+            for (index, pubkey) in instruction.extra_accounts.iter().enumerate() {
+                expanded_fields.push(create_text_field(
+                    &format!("Remaining Account {}", index + 1),
+                    pubkey,
+                )?);
+            }
+            for (key, value) in &parsed.program_call_args {
+                expanded_fields.push(create_text_field(key, &format_arg_value(value))?);
+            }
+        }
     }
 
     Ok((title, condensed_fields, expanded_fields))
@@ -217,6 +246,336 @@ fn build_fallback_fields(
     expanded_fields.push(create_text_field("Status", "Unknown instruction type")?);
 
     Ok((title, condensed_fields, expanded_fields))
+}
+
+// --- DFlow-aware rendering of `swap` / `swap2` params ---------------------
+//
+// The `swap` family carries a `SwapParams { actions: vec<Action>,
+// quoted_out_amount, slippage_bps, platform_fee_bps }`. Rather than collapse it
+// into one opaque field, surface the economics (what the signer pays/receives)
+// and a per-action route breakdown. Every field is a renderable leaf
+// (`text_v2`, or `number` which serializes as `text_v2`); arrays of bytes stay
+// hex via `format_arg_value`. See the Anchorage wallet render rules.
+
+/// Recognize a `swap`/`swap2` `params` argument by shape: an object carrying
+/// the `actions` route and the `quoted_out_amount` economics. Returns the
+/// object so the caller can render it structurally; anything else falls back to
+/// the generic [`format_arg_value`] path.
+fn as_swap_params<'a>(
+    key: &str,
+    value: &'a serde_json::Value,
+) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+    if key != "params" {
+        return None;
+    }
+    let map = value.as_object()?;
+    if map.contains_key("actions") && map.contains_key("quoted_out_amount") {
+        Some(map)
+    } else {
+        None
+    }
+}
+
+/// `snake_case` IDL account name -> `Title Case` label.
+fn humanize(name: &str) -> String {
+    name.split('_')
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A collapsible card: the wallet renders a `preview_layout`'s Condensed inline
+/// and drills into its Expanded on tap (the inner-program pattern
+/// `squads_multisig` uses). Build sections with [`section`] for single-item
+/// collapse.
+fn nested_group(
+    label: &str,
+    condensed: Vec<AnnotatedPayloadField>,
+    expanded: Vec<AnnotatedPayloadField>,
+) -> AnnotatedPayloadField {
+    AnnotatedPayloadField {
+        static_annotation: None,
+        dynamic_annotation: None,
+        signable_payload_field: SignablePayloadField::PreviewLayout {
+            common: SignablePayloadFieldCommon {
+                label: label.to_string(),
+                fallback_text: label.to_string(),
+            },
+            preview_layout: SignablePayloadFieldPreviewLayout {
+                title: Some(SignablePayloadFieldTextV2 {
+                    text: label.to_string(),
+                }),
+                subtitle: None,
+                condensed: Some(SignablePayloadFieldListLayout { fields: condensed }),
+                expanded: Some(SignablePayloadFieldListLayout { fields: expanded }),
+            },
+        },
+    }
+}
+
+/// A section: a collapsible `summary` -> `detail` card when it has multiple
+/// detail rows; the single row itself when there's exactly one (a lone item
+/// shouldn't be wrapped in a card); nothing when empty.
+fn section(
+    label: &str,
+    summary: Vec<AnnotatedPayloadField>,
+    detail: Vec<AnnotatedPayloadField>,
+) -> Vec<AnnotatedPayloadField> {
+    match detail.len() {
+        0 => Vec::new(),
+        1 => detail,
+        _ => vec![nested_group(label, summary, detail)],
+    }
+}
+
+/// "Swap Details" card: economics as the summary, with program id + discriminator
+/// added on drill-in.
+fn swap_details_section(
+    program_id: &str,
+    discriminator: &str,
+    params: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<AnnotatedPayloadField>, VisualSignError> {
+    let economics = economics_fields(params)?;
+    let mut detail = vec![
+        create_text_field("Program ID", program_id)?,
+        create_text_field("Discriminator", discriminator)?,
+    ];
+    detail.extend(economics.iter().cloned());
+    Ok(section("Swap Details", economics, detail))
+}
+
+/// "Route" card: a one-line venue summary, with the per-action breakdown on
+/// drill-in. A single-field action collapses to one `<Variant>` row; a
+/// multi-field action lists its fields under `<Variant> / <field>`.
+fn route_section(
+    params: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<AnnotatedPayloadField>, VisualSignError> {
+    let mut detail = Vec::new();
+    if let Some(actions) = params.get("actions").and_then(|a| a.as_array()) {
+        for action in actions {
+            let Some((variant, payload)) = single_variant(action) else {
+                continue;
+            };
+            let options = payload
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_object());
+            match options {
+                // Single-item action -> just a field (e.g. RecordId -> its id).
+                Some(options) if options.len() == 1 => {
+                    if let Some((field_name, field_value)) = options.iter().next() {
+                        detail.push(create_text_field(
+                            variant,
+                            &action_field_value(field_name, field_value),
+                        )?);
+                    }
+                }
+                Some(options) => {
+                    for (field_name, field_value) in options {
+                        // `candidate_actions` reads better as "candidates".
+                        let display = if field_name == "candidate_actions" {
+                            "candidates"
+                        } else {
+                            field_name
+                        };
+                        detail.push(create_text_field(
+                            &format!("{variant} / {display}"),
+                            &action_field_value(field_name, field_value),
+                        )?);
+                    }
+                }
+                None => detail.push(create_text_field(variant, "")?),
+            }
+        }
+    }
+    let summary = match route_summary(params) {
+        Some(route) => vec![create_text_field("Route", &route)?],
+        None => Vec::new(),
+    };
+    Ok(section("Route", summary, detail))
+}
+
+/// Render an action option value, expanding a `candidate_actions` venue list to
+/// its variant names.
+fn action_field_value(field_name: &str, field_value: &serde_json::Value) -> String {
+    if field_name == "candidate_actions"
+        && let Some(venues) = field_value
+            .as_array()
+            .filter(|items| {
+                items.iter().all(|item| {
+                    single_variant(item).is_some_and(|(_, payload)| {
+                        payload.as_array().is_some_and(|values| {
+                            values.iter().all(|value| {
+                                value.as_object().is_some_and(|object| object.is_empty())
+                            })
+                        })
+                    })
+                })
+            })
+            .and_then(|_| variant_names(field_value))
+    {
+        return venues.join(", ");
+    }
+    format_arg_value(field_value)
+}
+
+/// "Accounts" card: a `<n> resolved, <m> unresolved` count summary, with the
+/// detail on drill-in -- the resolved, IDL-named accounts listed by address,
+/// plus a single "Unresolved (lookup table)" row listing the ALT account
+/// placeholders and their account roles. The parser cannot resolve lookup
+/// table addresses offline; keep `unresolved(N)` explicit for signer consumers
+/// that reject transactions containing unresolved accounts.
+fn accounts_section(
+    named: &BTreeMap<String, String>,
+    extra: &[String],
+) -> Result<Vec<AnnotatedPayloadField>, VisualSignError> {
+    let mut resolved = Vec::new();
+    let mut unresolved_indices = Vec::new();
+
+    // Named accounts keep their humanized IDL role as the label.
+    for (name, address) in named {
+        match unresolved_index(address) {
+            Some(_) => unresolved_indices.push(format!("{}: {address}", humanize(name))),
+            None => resolved.push(create_text_field(&humanize(name), address)?),
+        }
+    }
+    // Remaining (unnamed) resolved accounts list their address under "Account".
+    for (index, address) in extra.iter().enumerate() {
+        match unresolved_index(address) {
+            Some(_) => {
+                unresolved_indices.push(format!("Remaining Account {}: {address}", index + 1))
+            }
+            None => resolved.push(create_text_field("Account", address)?),
+        }
+    }
+
+    let summary = create_text_field(
+        "Accounts",
+        &format!(
+            "{} resolved, {} unresolved",
+            resolved.len(),
+            unresolved_indices.len()
+        ),
+    )?;
+
+    let mut detail = resolved;
+    if !unresolved_indices.is_empty() {
+        detail.push(create_text_field(
+            "Unresolved (lookup table)",
+            &unresolved_indices.join(", "),
+        )?);
+    }
+    if detail.is_empty() {
+        // Nothing to enumerate -- surface just the count.
+        return Ok(vec![summary]);
+    }
+    Ok(vec![nested_group("Accounts", vec![summary], detail)])
+}
+
+/// The ALT account index `N` from an `unresolved(N)` placeholder, or `None` if
+/// the value is a resolved address.
+fn unresolved_index(account: &str) -> Option<&str> {
+    account.strip_prefix("unresolved(")?.strip_suffix(')')
+}
+
+/// `quoted_out_amount` / `slippage_bps` / `platform_fee_bps`, each as its own
+/// number field (which renders as text -- these are not amounts).
+///
+/// `quoted_out_amount` is shown in raw base units: the output mint lives in an
+/// ALT-loaded account we can't resolve offline, and there is no wallet->Solana
+/// token-metadata channel yet. Once both exist, this is the single place to
+/// render it via `create_amount_field` (symbol + decimals). Tracked by #388
+/// (Solana wallet token-metadata channel, mirroring Ethereum's ContractRegistry).
+fn economics_fields(
+    params: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<AnnotatedPayloadField>, VisualSignError> {
+    let mut fields = Vec::new();
+    for (key, label, unit) in [
+        ("quoted_out_amount", "Quoted Out Amount", ""),
+        ("slippage_bps", "Slippage", "bps"),
+        ("platform_fee_bps", "Platform Fee", "bps"),
+        (
+            "positive_slippage_fee_limit_pct",
+            "Positive Slippage Fee Limit",
+            "%",
+        ),
+    ] {
+        if let Some(text) = params.get(key).and_then(number_text) {
+            fields.push(create_number_field(label, &text, unit)?);
+        }
+    }
+    Ok(fields)
+}
+
+/// One-line route summary: the venues the order flows through. A
+/// `DFlowDynamicRouteV1` is expanded to its candidate venues; bookkeeping
+/// actions (`RecordId`, `TransferFee`, ...) are omitted.
+fn route_summary(params: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    let actions = params.get("actions")?.as_array()?;
+    let mut venues: Vec<String> = Vec::new();
+    let mut dynamic_route = false;
+    for action in actions {
+        let Some((variant, payload)) = single_variant(action) else {
+            continue;
+        };
+        if variant == "DFlowDynamicRouteV1" {
+            dynamic_route = true;
+            if let Some(candidates) = payload
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_object())
+                .and_then(|o| o.get("candidate_actions"))
+                .and_then(variant_names)
+            {
+                venues.extend(candidates);
+            }
+        } else if let Some(name) = variant.strip_suffix("Swap") {
+            venues.push(name.to_string());
+        }
+    }
+    if venues.is_empty() {
+        return None;
+    }
+    let joined = venues.join(", ");
+    Some(if dynamic_route {
+        format!("DFlow Dynamic Route via {joined}")
+    } else {
+        format!("via {joined}")
+    })
+}
+
+/// If `action` is a single-key object (a serde-encoded enum variant), return its
+/// `(variant_name, payload)`.
+fn single_variant(action: &serde_json::Value) -> Option<(&str, &serde_json::Value)> {
+    let map = action.as_object()?;
+    if map.len() != 1 {
+        return None;
+    }
+    map.iter().next().map(|(k, v)| (k.as_str(), v))
+}
+
+/// Collect the variant names from an array of single-key-object enum values
+/// (e.g. a `candidate_actions` list -> `["TesseraV", "BisonFi"]`).
+fn variant_names(value: &serde_json::Value) -> Option<Vec<String>> {
+    let items = value.as_array()?;
+    Some(
+        items
+            .iter()
+            .filter_map(|item| single_variant(item).map(|(name, _)| name.to_string()))
+            .collect(),
+    )
+}
+
+/// String form of a JSON number, or `None` for non-numbers.
+fn number_text(value: &serde_json::Value) -> Option<String> {
+    value.as_number().map(|n| n.to_string())
 }
 
 /// Render a single program-call argument as one field value.
@@ -262,8 +621,11 @@ fn format_arg_value(value: &serde_json::Value) -> String {
             }
         }
         serde_json::Value::Object(map) => {
-            let inner: Vec<String> = map
-                .iter()
+            // Feature unification can enable serde_json/preserve_order; render
+            // keys lexically regardless of the underlying map implementation.
+            let sorted: BTreeMap<_, _> = map.iter().collect();
+            let inner: Vec<String> = sorted
+                .into_iter()
                 .map(|(k, v)| format!("{}:{}", charset_safe(k), format_arg_value(v)))
                 .collect();
             format!("{{{}}}", inner.join(","))
@@ -306,8 +668,7 @@ fn bytes_as_hex(items: &[serde_json::Value]) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use solana_parser::IdlSource;
-    use solana_parser::parse_instruction_with_idl;
+    use solana_parser::{IdlSource, parse_instruction_with_idl};
     use solana_pubkey::Pubkey;
 
     fn field_label_value(field: &AnnotatedPayloadField) -> (String, String) {
@@ -380,14 +741,11 @@ mod tests {
         // emitted (see test_format_arg_value_is_charset_safe).
         assert_eq!(format_arg_value(&json!([])), "[]");
         assert_eq!(format_arg_value(&json!({})), "{}");
-        // Object renders both fields quote-free. Assert order-insensitively: the
-        // key order depends on whether `serde_json/preserve_order` is active
-        // (BTreeMap = sorted vs. insertion order), which feature unification can
-        // flip without changing correctness.
-        let object = format_arg_value(&json!({"side": "buy", "amount": 100}));
-        assert!(
-            object == "{amount:100,side:buy}" || object == "{side:buy,amount:100}",
-            "object should render both fields quote-free in some order: {object}"
+        // serde_json::Map is a BTreeMap without the `preserve_order` feature, so
+        // keys come out sorted -- assert against that deterministic order.
+        assert_eq!(
+            format_arg_value(&json!({"side": "buy", "amount": 100})),
+            "{amount:100,side:buy}"
         );
         // Arrays of non-byte values render as a bracketed, comma-joined list.
         assert_eq!(
@@ -411,12 +769,10 @@ mod tests {
 
     #[test]
     fn test_format_arg_value_is_charset_safe() {
-        // Historically SignablePayload::validate_charset rejected the `\"`
-        // and `\\` JSON escapes (#332), so real compact JSON of an object --
-        // with quoted keys -- would fail. PRS-572 relaxed that deny-list, but
-        // this preset still deliberately renders quote-free (see
-        // `format_arg_value`'s doc comment), so this pins that our rendering
-        // continues to contain neither `"` nor `\`.
+        // SignablePayload::validate_charset rejects the `\"` and `\\` JSON
+        // escapes (#332). Real compact JSON of an object would emit quoted keys
+        // (-> `\"`) and fail. Our quote-free rendering must contain neither `"`
+        // nor `\` so the whole payload stays charset-valid end to end.
         let nested = json!({
             "actions": [{"RecordId": [{"id": (0u8..76).collect::<Vec<u8>>()}]}],
             "quoted_out_amount": 68_980_730u64,
@@ -474,9 +830,7 @@ mod tests {
         let value = parsed.program_call_args.get("params").unwrap();
         let now = format_arg_value(value);
 
-        // Charset-safe (the pre-#286 compact JSON would have failed the
-        // stricter pre-PRS-572 validate_charset; this preset still renders
-        // quote-free by choice, see format_arg_value's doc comment).
+        // Charset-safe (the pre-#286 compact JSON would fail validate_charset).
         assert!(
             !now.contains('"') && !now.contains('\\'),
             "not charset-safe: {now}"
@@ -499,25 +853,71 @@ mod tests {
         );
     }
 
+    /// Recursively flatten fields -- descending into nested `preview_layout`
+    /// groups -- into (label, display-value) pairs. The display value comes from
+    /// fallback_text, so it works for `Number` economics fields too.
+    fn flatten_fields(fields: &[AnnotatedPayloadField], out: &mut Vec<(String, String)>) {
+        for field in fields {
+            match &field.signable_payload_field {
+                SignablePayloadField::PreviewLayout {
+                    common,
+                    preview_layout,
+                } => {
+                    out.push((common.label.clone(), common.fallback_text.clone()));
+                    if let Some(condensed) = &preview_layout.condensed {
+                        flatten_fields(&condensed.fields, out);
+                    }
+                    if let Some(expanded) = &preview_layout.expanded {
+                        flatten_fields(&expanded.fields, out);
+                    }
+                }
+                other => out.push((other.label().clone(), other.fallback_text().clone())),
+            }
+        }
+    }
+
+    // Match Sigil's review-field traversal: expanded details take precedence.
+    fn flatten_expanded_fields(fields: &[AnnotatedPayloadField], out: &mut Vec<(String, String)>) {
+        for field in fields {
+            match &field.signable_payload_field {
+                SignablePayloadField::PreviewLayout { preview_layout, .. } => {
+                    if let Some(rows) = preview_layout
+                        .expanded
+                        .as_ref()
+                        .or(preview_layout.condensed.as_ref())
+                    {
+                        flatten_expanded_fields(&rows.fields, out);
+                    }
+                }
+                other => out.push((other.label().clone(), other.fallback_text().clone())),
+            }
+        }
+    }
+
     #[test]
-    fn test_format_arg_value_does_not_blow_up_nested_fields() {
-        // Regression guard for the field explosion (introduced by #286's
-        // recursive push_arg_fields, reverted here): a deeply-nested `params`
-        // argument that contains a 76-byte array (e.g. RecordId.id) must render
-        // as exactly ONE field per top-level argument, NOT one field per byte.
+    fn test_swap_params_render_dflow_aware_grouped() {
+        // `swap` params render into collapsible cards: route + economics in the
+        // condensed view; Swap Details / Route / Accounts cards (each a nested
+        // preview_layout: condensed summary + expanded detail) in expanded. A
+        // single-field action collapses to one row; the 76-byte RecordId.id stays
+        // ONE hex field; ALT-unresolved accounts are counted, not listed; every
+        // value is charset-safe.
         let id_bytes: Vec<u8> = (0..76).collect();
         let params = json!({
             "actions": [
                 {"RecordId": [{"id": id_bytes}]},
-                {"DFlowDynamicRouteV1": [{"amount": 5_000_000u64,
-                                          "orchestrator_flags": {"flags": 1}}]},
+                {"DFlowDynamicRouteV1": [{
+                    "candidate_actions": [{"TesseraV": [{}]}, {"BisonFi": [{}]}],
+                    "amount": 5_000_000u64,
+                    "orchestrator_flags": {"flags": 1}
+                }]},
             ],
             "quoted_out_amount": 68_980_730u64,
             "slippage_bps": 20,
             "platform_fee_bps": 0,
         });
         let mut program_call_args = serde_json::Map::new();
-        program_call_args.insert("params".to_string(), params.clone());
+        program_call_args.insert("params".to_string(), params);
 
         let parsed = DflowAggregatorParsedInstruction {
             parsed: SolanaParsedInstructionData {
@@ -528,56 +928,213 @@ mod tests {
                 idl_source: IdlSource::Custom,
                 idl_hash: String::new(),
             },
-            named_accounts: BTreeMap::new(),
-            extra_accounts: Vec::new(),
+            // One resolved + one unresolved named account, and likewise extras,
+            // to exercise the resolved/unresolved partitioning.
+            named_accounts: BTreeMap::from([
+                (
+                    "token_program".to_string(),
+                    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".to_string(),
+                ),
+                ("event_authority".to_string(), "unresolved(18)".to_string()),
+            ]),
+            extra_accounts: vec![
+                "oot7FZrQ9BEUWTABBSgE5dgmxvcFteG3Mg97N9SEyAe".to_string(),
+                "unresolved(5)".to_string(),
+            ],
         };
 
         let (_title, condensed, expanded) = build_parsed_fields(&parsed, "PROGRAM_ID").unwrap();
+        let mut condensed_pairs = Vec::new();
+        flatten_fields(&condensed, &mut condensed_pairs);
+        let mut expanded_pairs = Vec::new();
+        flatten_fields(&expanded, &mut expanded_pairs);
+        let find = |pairs: &[(String, String)], label: &str| -> Option<String> {
+            pairs
+                .iter()
+                .find(|(l, _)| l == label)
+                .map(|(_, v)| v.clone())
+        };
 
-        for (view, fields) in [("condensed", &condensed), ("expanded", &expanded)] {
-            let labels: Vec<String> = fields.iter().map(|f| field_label_value(f).0).collect();
-            // Exactly one field carries the whole `params` argument.
-            let params_fields: Vec<&String> = labels.iter().filter(|l| *l == "params").collect();
-            assert_eq!(
-                params_fields.len(),
-                1,
-                "{view} view should render `params` as a single field, got labels: {labels:?}"
-            );
-            // No flattened / indexed leaf labels leaked through.
+        // Condensed: route summary + economics.
+        assert_eq!(
+            find(&condensed_pairs, "Route").as_deref(),
+            Some("DFlow Dynamic Route via TesseraV, BisonFi")
+        );
+        assert_eq!(
+            find(&condensed_pairs, "Quoted Out Amount").as_deref(),
+            Some("68980730")
+        );
+        assert_eq!(
+            find(&condensed_pairs, "Slippage").as_deref(),
+            Some("20 bps")
+        );
+        assert_eq!(
+            find(&condensed_pairs, "Platform Fee").as_deref(),
+            Some("0 bps")
+        );
+
+        // Expanded holds collapsible cards in order: Swap Details -> Route -> Accounts.
+        let section_index =
+            |name: &str| -> Option<usize> { expanded_pairs.iter().position(|(l, _)| l == name) };
+        let swap_details = section_index("Swap Details").expect("Swap Details card");
+        let route = section_index("Route").expect("Route card");
+        let accounts = section_index("Accounts").expect("Accounts card");
+        assert!(
+            swap_details < route && route < accounts,
+            "cards must be ordered Swap Details < Route < Accounts: {expanded_pairs:?}"
+        );
+        // Swap Details surfaces the instruction metadata under its card.
+        assert!(
+            section_index("Program ID").is_some_and(|i| i > swap_details && i < route),
+            "Program ID under Swap Details: {expanded_pairs:?}"
+        );
+        assert!(
+            section_index("Discriminator").is_some_and(|i| i > swap_details && i < route),
+            "Discriminator under Swap Details: {expanded_pairs:?}"
+        );
+
+        // Route: a single-field action collapses to one `<Variant>` row (RecordId
+        // -> its id, one hex field); a multi-field action lists `<Variant> / <field>`.
+        let record_id = find(&expanded_pairs, "RecordId").expect("RecordId row");
+        assert!(
+            record_id.starts_with("0x000102030405"),
+            "id should be hex: {record_id}"
+        );
+        assert_eq!(
+            find(&expanded_pairs, "DFlowDynamicRouteV1 / amount").as_deref(),
+            Some("5000000")
+        );
+        assert_eq!(
+            find(&expanded_pairs, "DFlowDynamicRouteV1 / candidates").as_deref(),
+            Some("TesseraV, BisonFi")
+        );
+
+        // Accounts: count summary + resolved (named) accounts only; the
+        // ALT-unresolved ones are counted, not listed.
+        assert!(
+            expanded_pairs
+                .iter()
+                .any(|(l, v)| l == "Accounts" && v == "2 resolved, 2 unresolved"),
+            "accounts summary present: {expanded_pairs:?}"
+        );
+        assert_eq!(
+            find(&expanded_pairs, "Token Program").as_deref(),
+            Some("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+        );
+        // The grouped unresolved row retains each slot role and its exact placeholder.
+        let unresolved = find(&expanded_pairs, "Unresolved (lookup table)")
+            .expect("unresolved index row present");
+        assert!(
+            unresolved.contains("Event Authority: unresolved(18)")
+                && unresolved.contains("Remaining Account 2: unresolved(5)"),
+            "unresolved row should list ALT indices: {unresolved}"
+        );
+        assert!(
+            find(&expanded_pairs, "Event Authority").is_none(),
+            "unresolved Event Authority must not be a named row: {expanded_pairs:?}"
+        );
+
+        let mut review_pairs = Vec::new();
+        flatten_expanded_fields(&expanded, &mut review_pairs);
+        assert_eq!(
+            find(&review_pairs, "Quoted Out Amount").as_deref(),
+            Some("68980730")
+        );
+        assert_eq!(
+            find(&review_pairs, "DFlowDynamicRouteV1 / amount").as_deref(),
+            Some("5000000")
+        );
+        assert_eq!(
+            find(&review_pairs, "Token Program").as_deref(),
+            Some("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+        );
+        assert!(
+            find(&review_pairs, "Unresolved (lookup table)")
+                .unwrap()
+                .contains("unresolved(18)")
+        );
+
+        // No per-byte / indexed explosion, and all values are charset-safe.
+        for (label, value) in condensed_pairs.iter().chain(expanded_pairs.iter()) {
+            assert!(!label.contains('['), "no indexed leaf labels: {label}");
             assert!(
-                !labels
-                    .iter()
-                    .any(|l| l.starts_with("params.") || l.contains('[')),
-                "{view} view must not explode nested params into per-leaf fields: {labels:?}"
+                !value.contains('"') && !value.contains('\\'),
+                "value must be charset-safe: {label} = {value}"
             );
         }
+    }
 
-        // The single field holds the whole value quote-free, with the 76-byte
-        // RecordId.id collapsed to one 0x-hex string (not a per-byte list) and
-        // the meaningful scalars still legible inline.
-        let params_value = expanded
+    #[test]
+    fn test_swap2_wire_fee_caps_are_visible_in_both_layouts() {
+        let idl = get_dflow_aggregator_idl().unwrap();
+        for name in [
+            "swap2",
+            "swap2_with_destination",
+            "swap2_with_destination_native",
+        ] {
+            let instruction = idl.instructions.iter().find(|ix| ix.name == name).unwrap();
+            let mut observed = Vec::new();
+            for cap in [0u8, 100u8] {
+                let mut data = instruction.discriminator.as_ref().unwrap().clone();
+                data.extend_from_slice(&0u32.to_le_bytes()); // Empty actions vector.
+                data.extend_from_slice(&1000u64.to_le_bytes()); // Quoted output.
+                data.extend_from_slice(&20u16.to_le_bytes()); // Slippage bps.
+                data.extend_from_slice(&10u16.to_le_bytes()); // Platform fee bps.
+                data.push(cap);
+                let parsed = parse_dflow_aggregator_instruction(&data, &[]).unwrap();
+                assert_eq!(
+                    parsed.parsed.program_call_args["params"]["positive_slippage_fee_limit_pct"],
+                    json!(cap)
+                );
+                let (_, condensed, expanded) =
+                    build_parsed_fields(&parsed, DFLOW_AGGREGATOR_PROGRAM_ID).unwrap();
+                let mut review = Vec::new();
+                flatten_expanded_fields(&expanded, &mut review);
+                let expected = format!("{cap} %");
+                for fields in [
+                    condensed
+                        .iter()
+                        .map(|field| {
+                            (
+                                field.signable_payload_field.label().clone(),
+                                field.signable_payload_field.fallback_text().clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                    review,
+                ] {
+                    let value = fields
+                        .iter()
+                        .find(|(label, _)| label == "Positive Slippage Fee Limit")
+                        .map(|(_, value)| value);
+                    assert_eq!(value, Some(&expected), "{name}, cap={cap}: {fields:?}");
+                }
+                observed.push(expected);
+            }
+            assert_ne!(observed[0], observed[1]);
+        }
+    }
+
+    #[test]
+    fn test_candidate_action_parameters_are_preserved() {
+        let candidates =
+            json!([{"HumidiFi": [{"swap_id": 1234}]}, {"Manifest": [{"include_global": true}]}]);
+        let rendered = action_field_value("candidate_actions", &candidates);
+        assert!(rendered.contains("swap_id:1234"), "{rendered}");
+        assert!(rendered.contains("include_global:true"), "{rendered}");
+    }
+
+    #[test]
+    fn test_unresolved_accounts_are_not_replaced_by_idl_constraints() {
+        let idl = get_dflow_aggregator_idl().unwrap();
+        let swap = idl
+            .instructions
             .iter()
-            .map(field_label_value)
-            .find(|(label, _)| label == "params")
-            .map(|(_, value)| value)
-            .expect("params field present");
-        assert!(
-            params_value.contains("id:0x000102030405"),
-            "byte array should render as inline hex, got: {params_value}"
-        );
-        assert!(
-            !params_value.contains("[0,1,2,3"),
-            "byte array must not render as a per-byte number list, got: {params_value}"
-        );
-        assert!(
-            params_value.contains("quoted_out_amount:68980730")
-                && params_value.contains("slippage_bps:20"),
-            "meaningful scalars should remain legible inline, got: {params_value}"
-        );
-        assert!(
-            !params_value.contains('"') && !params_value.contains('\\'),
-            "rendered params must be charset-safe, got: {params_value}"
-        );
+            .find(|ix| ix.name == "swap")
+            .unwrap();
+        let accounts = vec!["unresolved(18)".to_string(); swap.accounts.len()];
+        let (named, _) = build_named_accounts(swap.discriminator.as_ref().unwrap(), idl, &accounts);
+        assert!(named.values().all(|value| value == "unresolved(18)"));
     }
 
     #[test]

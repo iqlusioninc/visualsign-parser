@@ -21,6 +21,7 @@ borsh = { version = "1.5.7", features = [
 # Optional deps
 serde = { version = "1", features = [
   "derive",
+  "alloc",
 ], optional = true, default-features = false }
 tonic = { version = "0.10", optional = true, features = [
   "transport",

@@ -1,6 +1,8 @@
 //! Token 2022 preset implementation for Solana
 
+pub(crate) mod confidential_transfer;
 mod config;
+pub(crate) use confidential_transfer::{ConfidentialTransferIx, try_decode_confidential_transfer};
 
 use crate::core::{
     AccountRef, InstructionVisualizer, SolanaIntegrationConfig, VisualizerContext, VisualizerKind,
@@ -64,7 +66,7 @@ impl InstructionVisualizer for Token2022Visualizer {
             .collect::<Result<Vec<_>, _>>()?;
 
         // Instructions this preset does not decode (extensions such as
-        // confidential transfers, checked transfers carrying transfer-hook or
+        // unsupported extensions, checked transfers carrying transfer-hook or
         // multisig accounts, malformed data) degrade to a raw layout titled
         // "Token 2022 (unparsed)" instead of failing the whole transaction.
         match parse_token_2022_instruction(context.data(), &accounts) {
@@ -175,6 +177,8 @@ enum Token2022Instruction {
         current_authority: String,
         new_authority: Option<String>,
     },
+    ConfidentialWithdraw(ConfidentialTransferIx),
+    ConfidentialTransfer(ConfidentialTransferIx),
 }
 
 fn parse_token_2022_instruction(
@@ -260,6 +264,25 @@ fn parse_token_2022_instruction(
             }) => checked_transfer(amount, decimals, Some(fee), accounts),
             _ => Err("Unsupported Token 2022 transfer fee instruction".to_string()),
         };
+    }
+
+    // Supported confidential sub-instructions use the same wire decoder as policy.
+    if let Some(ix) = confidential_transfer::try_decode_confidential_transfer(data, accounts)? {
+        if let ConfidentialTransferIx::Withdraw { decimals, .. } = &ix
+            && *decimals > MAX_TOKEN_DECIMALS
+        {
+            return Err(format!(
+                "Confidential withdraw decimals {decimals} exceeds maximum supported value {MAX_TOKEN_DECIMALS}"
+            ));
+        }
+        return Ok(match ix {
+            ConfidentialTransferIx::Withdraw { .. } => {
+                Token2022Instruction::ConfidentialWithdraw(ix)
+            }
+            ConfidentialTransferIx::Transfer { .. } => {
+                Token2022Instruction::ConfidentialTransfer(ix)
+            }
+        });
     }
 
     // Try to parse as standard TokenInstruction first
@@ -907,6 +930,131 @@ fn create_token_2022_preview_layout(
 
             (title, condensed, expanded)
         }
+        Token2022Instruction::ConfidentialWithdraw(ConfidentialTransferIx::Withdraw {
+            source_token_account,
+            mint,
+            owner,
+            amount,
+            decimals,
+            new_decryptable_available_balance,
+            equality_proof_context_account,
+            range_proof_context_account,
+        }) => {
+            let formatted_amount = format_token_amount(*amount, *decimals);
+            let title = format!("Confidential Withdraw: {formatted_amount} tokens");
+            let condensed = vec![
+                create_text_field("Action", "Confidential Withdraw")?,
+                create_text_field("Amount", &formatted_amount)?,
+            ];
+            let mut expanded = vec![
+                create_text_field("Instruction", "Confidential Withdraw")?,
+                create_text_field("Amount", &formatted_amount)?,
+                create_number_field("Raw Amount", &amount.to_string(), "")?,
+                create_number_field("Decimals", &decimals.to_string(), "")?,
+                create_text_field("Mint", mint)?,
+                create_text_field("Source Token Account", source_token_account)?,
+                create_text_field("Owner", owner)?,
+            ];
+            if let Some(a) = equality_proof_context_account {
+                expanded.push(create_text_field("Equality Proof Context Account", a)?);
+            }
+            if let Some(a) = range_proof_context_account {
+                expanded.push(create_text_field("Range Proof Context Account", a)?);
+            }
+            // Opaque / fallback at the bottom.
+            expanded.push(create_text_field(
+                "New Decryptable Available Balance (encrypted; wallet decrypts)",
+                new_decryptable_available_balance,
+            )?);
+            expanded.push(create_text_field(
+                "Program ID",
+                &resolve_program_display(context),
+            )?);
+            expanded.push(create_raw_data_field(
+                context.data(),
+                Some(hex::encode(context.data())),
+            )?);
+            (title, condensed, expanded)
+        }
+        Token2022Instruction::ConfidentialTransfer(ConfidentialTransferIx::Transfer {
+            source_token_account,
+            mint,
+            destination_token_account,
+            owner,
+            new_source_decryptable_available_balance,
+            auditor_configured,
+            equality_proof_context_account,
+            validity_proof_context_account,
+            range_proof_context_account,
+        }) => {
+            let decoded = context.confidential_decoded_amount();
+            let title = match decoded {
+                Some(a) => format!("Confidential Transfer: {a} base units (wallet supplied)"),
+                None => "Confidential Transfer".to_string(),
+            };
+            let mut condensed = vec![create_text_field("Action", "Confidential Transfer")?];
+            if let Some(a) = decoded {
+                condensed.push(create_text_field(
+                    "Amount (base units; wallet supplied)",
+                    &a.to_string(),
+                )?);
+            }
+            let mut expanded = vec![create_text_field("Instruction", "Confidential Transfer")?];
+            if let Some(a) = decoded {
+                expanded.push(create_text_field(
+                    "Amount (base units; wallet supplied)",
+                    &a.to_string(),
+                )?);
+            }
+            expanded.push(create_text_field("Mint", mint)?);
+            expanded.push(create_text_field(
+                "Source Token Account",
+                source_token_account,
+            )?);
+            expanded.push(create_text_field(
+                "Destination Token Account",
+                destination_token_account,
+            )?);
+            expanded.push(create_text_field("Owner", owner)?);
+            if let Some(a) = equality_proof_context_account {
+                expanded.push(create_text_field("Equality Proof Context Account", a)?);
+            }
+            if let Some(a) = validity_proof_context_account {
+                expanded.push(create_text_field("Validity Proof Context Account", a)?);
+            }
+            if let Some(a) = range_proof_context_account {
+                expanded.push(create_text_field("Range Proof Context Account", a)?);
+            }
+            // Opaque / fallback at the bottom.
+            expanded.push(create_text_field(
+                "Auditor Ciphertext Present",
+                if *auditor_configured { "yes" } else { "no" },
+            )?);
+            expanded.push(create_text_field(
+                "New Source Decryptable Available Balance (encrypted; wallet decrypts)",
+                new_source_decryptable_available_balance,
+            )?);
+            expanded.push(create_text_field(
+                "Program ID",
+                &resolve_program_display(context),
+            )?);
+            expanded.push(create_raw_data_field(
+                context.data(),
+                Some(hex::encode(context.data())),
+            )?);
+            (title, condensed, expanded)
+        }
+        // `ConfidentialWithdraw` and `ConfidentialTransfer` are constructed
+        // exclusively from the matching `ConfidentialTransferIx` variant in
+        // `parse_token_2022_instruction`; the mismatched combinations below
+        // are unreachable in practice but must be handled since the wrapped
+        // enum has two variants.
+        Token2022Instruction::ConfidentialWithdraw(ConfidentialTransferIx::Transfer { .. })
+        | Token2022Instruction::ConfidentialTransfer(ConfidentialTransferIx::Withdraw { .. }) => {
+            return Err(VisualSignError::DecodeError(
+                "confidential_transfer: mismatched instruction variant".to_string(),
+            ));
+        }
     };
 
     preview_field(title, condensed_fields, expanded_fields, context)
@@ -1175,6 +1323,40 @@ mod tests {
             rows.iter().any(|r| r.contains("2 extra accounts")),
             "{rows:#?}"
         );
+    }
+
+    #[test]
+    fn confidential_withdraw_shows_plaintext_amount_and_context_owner() {
+        // [27, 6, amount LE, decimals, AE ciphertext (36), eq offset, range offset].
+        let mut data = vec![27, 6];
+        data.extend_from_slice(&1_500_000u64.to_le_bytes());
+        data.push(6);
+        data.extend_from_slice(&[0; 38]);
+        let k = keys(5);
+        let (title, rows) = visualize(data, &k);
+        assert_eq!(title, "Confidential Withdraw: 1.5 tokens");
+        assert!(rows.contains(&format!("Owner: {}", k[4])), "{rows:#?}");
+        assert!(
+            rows.contains(&format!("Equality Proof Context Account: {}", k[2])),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn confidential_transfer_keeps_amount_hidden_and_maps_mixed_proofs() {
+        // AE balance 36 + two auditor ciphertexts 64 each + signed proof offsets.
+        let mut data = vec![27, 7];
+        data.extend_from_slice(&[0; 164]);
+        data.extend_from_slice(&[255, 0, 1]);
+        let k = keys(6);
+        let (title, rows) = visualize(data, &k);
+        assert_eq!(title, "Confidential Transfer");
+        assert!(rows.contains(&format!("Owner: {}", k[5])), "{rows:#?}");
+        assert!(
+            rows.contains(&format!("Validity Proof Context Account: {}", k[4])),
+            "{rows:#?}"
+        );
+        assert!(!rows.iter().any(|row| row.starts_with("Amount:")));
     }
 
     #[test]

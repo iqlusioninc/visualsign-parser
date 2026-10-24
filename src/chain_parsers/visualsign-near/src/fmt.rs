@@ -59,6 +59,21 @@ pub(crate) fn charset_safe(text: &str) -> String {
         .collect()
 }
 
+/// Reversible ASCII display of signed off-chain text. Percent and backslash
+/// are escaped too, so literal escape-like strings cannot impersonate bytes
+/// the caller did not provide, and the payload charset validator accepts it.
+pub(crate) fn charset_escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte == b' ' || (byte.is_ascii_graphic() && byte != b'%' && byte != b'\\') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
 /// Render `units / 10^decimals` as a decimal string with trailing-zero trim.
 ///
 /// No rounding: the value is exact. A zero fractional part yields just the

@@ -398,3 +398,13 @@ fn test_encode_freeze_thaw_instructions() {
     assert_eq!(freeze_decoded, freeze_bytes);
     assert_eq!(thaw_decoded, thaw_bytes);
 }
+
+#[test]
+fn test_confidential_withdraw_fixture() {
+    test_real_transaction("confidential_withdraw", "Confidential Withdraw");
+}
+
+#[test]
+fn test_confidential_transfer_fixture() {
+    test_real_transaction("confidential_transfer", "Confidential Transfer");
+}

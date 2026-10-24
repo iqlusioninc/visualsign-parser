@@ -78,3 +78,15 @@ The parser recognizes common Solana programs:
 - [Solana Documentation](https://docs.solana.com/)
 - [SPL Token Program](https://spl.solana.com/token)
 - [Anchor Framework](https://www.anchor-lang.com/)
+
+
+## Off-chain message signing
+
+An off-chain request carries `{"message":"...","signerAddress":"..."}`.
+`message` is a UTF-8 string, and the signing preimage is exactly its UTF-8 bytes,
+without a transaction serialization or an off-chain message domain header.
+The parser displays `signerAddress` and validates its base58 address format.
+It cannot authenticate that caller-supplied address: the consuming wallet must
+compare it with the selected signing key before approval and signing. The address
+is outside the signing preimage. Parser attestation does not establish that key
+binding or prove that an intents `signer_id` authorizes that key on NEAR.

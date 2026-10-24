@@ -10,6 +10,8 @@ mod integrations;
 /// Chain-specific structured decode emitted as
 /// `ParsedTransactionPayload.intermediate_output`. Published so downstream
 /// consumers can `borsh::from_slice` into the same schema the parser produces.
+#[cfg(feature = "intents")]
+pub mod intents;
 pub mod intermediate;
 // Slow (~18s in debug), so it runs in only one `make test` pass: the default-feature,
 // diagnostics-off build that matches the production payload shape. Keep this cfg in

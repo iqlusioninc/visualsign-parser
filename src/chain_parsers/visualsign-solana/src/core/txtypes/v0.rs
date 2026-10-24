@@ -82,6 +82,21 @@ pub fn decode_v0_instructions(
     idl_registry: &crate::idl::IdlRegistry,
     lint_config: &visualsign::lint::LintConfig,
 ) -> DecodeInstructionsResult {
+    decode_v0_instructions_with_hints(
+        v0_message,
+        &std::collections::BTreeMap::new(),
+        idl_registry,
+        lint_config,
+    )
+}
+
+#[cfg(feature = "diagnostics")]
+pub fn decode_v0_instructions_with_hints(
+    v0_message: &solana_message::v0::Message,
+    hints: &std::collections::BTreeMap<u32, u64>,
+    idl_registry: &crate::idl::IdlRegistry,
+    lint_config: &visualsign::lint::LintConfig,
+) -> DecodeInstructionsResult {
     let visualizers: Vec<Box<dyn InstructionVisualizer>> = available_visualizers();
     let visualizers_refs: Vec<&dyn InstructionVisualizer> =
         visualizers.iter().map(|v| v.as_ref()).collect::<Vec<_>>();
@@ -132,7 +147,12 @@ pub fn decode_v0_instructions(
             writable: false,
         };
 
-        let context = VisualizerContext::new(&sender, ci, account_keys, idl_registry, i);
+        let context = VisualizerContext::new(&sender, ci, account_keys, idl_registry, i)
+            .with_confidential_decoded_amount(
+                u32::try_from(i)
+                    .ok()
+                    .and_then(|index| hints.get(&index).copied()),
+            );
 
         match visualize_with_any(&visualizers_refs, &context) {
             Some(Ok(mut viz_result)) => {
@@ -171,6 +191,15 @@ pub fn decode_v0_instructions(
     v0_message: &solana_message::v0::Message,
     idl_registry: &crate::idl::IdlRegistry,
 ) -> Result<DecodedInstructions, VisualSignError> {
+    decode_v0_instructions_with_hints(v0_message, &std::collections::BTreeMap::new(), idl_registry)
+}
+
+#[cfg(not(feature = "diagnostics"))]
+pub fn decode_v0_instructions_with_hints(
+    v0_message: &solana_message::v0::Message,
+    hints: &std::collections::BTreeMap<u32, u64>,
+    idl_registry: &crate::idl::IdlRegistry,
+) -> Result<DecodedInstructions, VisualSignError> {
     let visualizers: Vec<Box<dyn InstructionVisualizer>> = available_visualizers();
     let visualizers_refs: Vec<&dyn InstructionVisualizer> =
         visualizers.iter().map(|v| v.as_ref()).collect::<Vec<_>>();
@@ -192,7 +221,12 @@ pub fn decode_v0_instructions(
             writable: false,
         };
 
-        let context = VisualizerContext::new(&sender, ci, account_keys, idl_registry, i);
+        let context = VisualizerContext::new(&sender, ci, account_keys, idl_registry, i)
+            .with_confidential_decoded_amount(
+                u32::try_from(i)
+                    .ok()
+                    .and_then(|index| hints.get(&index).copied()),
+            );
 
         match visualize_with_any(&visualizers_refs, &context) {
             Some(Ok(mut viz_result)) => {
