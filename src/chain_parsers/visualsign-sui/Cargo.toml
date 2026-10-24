@@ -5,6 +5,8 @@ edition = "2024"
 rust-version.workspace = true
 
 [dependencies]
+# Security floor for transitive RustCrypto arithmetic (RUSTSEC-2026-0387).
+crypto-bigint = { workspace = true }
 tracing = { workspace = true }
 
 base64 = { workspace = true }
@@ -23,8 +25,8 @@ sui-sdk-types = { version = "0.4.0", default-features = false, features = ["serd
 # Pure-Rust point/scalar parsing preserves legacy envelope rejection checks;
 # transaction signatures are never verified by the parser.
 ed25519-consensus = { version = "2", default-features = false }
-k256 = { version = "0.13", default-features = false, features = ["arithmetic"] }
-p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+k256 = { version = "0.14", default-features = false, features = ["arithmetic"] }
+p256 = { version = "0.14", default-features = false, features = ["ecdsa"] }
 
 visualsign = { workspace = true }
 
