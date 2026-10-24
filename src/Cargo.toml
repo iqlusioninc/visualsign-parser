@@ -68,6 +68,8 @@ qos_p256 = { git = "https://github.com/tkhq/qos.git", rev = "82d8e18b8875362cdb6
 qos_test_primitives = { git = "https://github.com/tkhq/qos.git", rev = "82d8e18b8875362cdb639f962b6a7f78bd42d320", default-features = false }
 
 # Common dependencies
+# RUSTSEC-2026-0387: enforce the fixed bigint floor in downstream lockfiles.
+crypto-bigint = { version = "0.7.6", default-features = false }
 base64 = "0.22.1"
 hex = "0.4.3"
 
@@ -83,10 +85,11 @@ visualsign = { path = "./visualsign" }
 
 near-sdk = { version = "5.27", features = ["non-contract-usage"] }
 
-defuse-core     = { git = "https://github.com/near/intents.git", tag = "defuse/v0.4.2" }
-defuse-crypto   = { git = "https://github.com/near/intents.git", tag = "defuse/v0.4.2" }
-defuse-deadline = { git = "https://github.com/near/intents.git", tag = "defuse/v0.4.2" }
-defuse-nep413   = { git = "https://github.com/near/intents.git", tag = "defuse/v0.4.2" }
+# Defuse v0.4.2 plus the P-256 security backport; keep all four refs identical.
+defuse-core     = { git = "https://github.com/iqlusioninc/near-intents", rev = "84ebfea67728109c1e95675f37a39d8f38ace115" }
+defuse-crypto   = { git = "https://github.com/iqlusioninc/near-intents", rev = "84ebfea67728109c1e95675f37a39d8f38ace115" }
+defuse-deadline = { git = "https://github.com/iqlusioninc/near-intents", rev = "84ebfea67728109c1e95675f37a39d8f38ace115" }
+defuse-nep413   = { git = "https://github.com/iqlusioninc/near-intents", rev = "84ebfea67728109c1e95675f37a39d8f38ace115" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

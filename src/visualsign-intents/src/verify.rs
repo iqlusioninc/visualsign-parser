@@ -243,7 +243,7 @@ mod tests {
     /// The signer's uncompressed public key, SEC1 minus the 0x04 prefix.
     fn erc191_test_pubkey64() -> [u8; 64] {
         let sk = k256::ecdsa::SigningKey::from_bytes((&ERC191_TEST_KEY).into()).unwrap();
-        let point = sk.verifying_key().to_encoded_point(false);
+        let point = sk.verifying_key().to_sec1_point(false);
         let mut pk = [0u8; 64];
         pk.copy_from_slice(&point.as_bytes()[1..65]);
         pk
@@ -281,7 +281,7 @@ mod tests {
         .concat();
         let hash = near_sdk::env::keccak256_array(&prehash);
         let sk = k256::ecdsa::SigningKey::from_bytes((&ERC191_TEST_KEY).into()).unwrap();
-        let (sig, recovery_id) = sk.sign_prehash_recoverable(&hash).unwrap();
+        let (sig, recovery_id) = sk.sign_prehash_recoverable(&hash);
         let mut sig65 = [0u8; 65];
         sig65[..64].copy_from_slice(&sig.to_bytes());
         sig65[64] = recovery_id.to_byte();
@@ -482,7 +482,7 @@ mod tests {
         .concat();
         let hash = near_sdk::env::keccak256_array(&prehash);
         let sk = k256::ecdsa::SigningKey::from_bytes((&key).into()).expect("valid key");
-        let (sig, recovery_id) = sk.sign_prehash_recoverable(&hash).expect("sign");
+        let (sig, recovery_id) = sk.sign_prehash_recoverable(&hash);
 
         let mut produced = [0u8; 65];
         produced[..64].copy_from_slice(&sig.to_bytes());

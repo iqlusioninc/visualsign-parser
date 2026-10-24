@@ -51,7 +51,7 @@ use ed25519_dalek::{Signature as Ed25519Signature, VerifyingKey as Ed25519Verify
 #[cfg(any(test, feature = "dev-signing"))]
 use ed25519_dalek::{Signer as Ed25519Signer, SigningKey as Ed25519SigningKey};
 use generated::parser::{ChainMetadata, TokenOriginChain, chain_metadata};
-use k256::EncodedPoint;
+use k256::Sec1Point;
 #[cfg(any(test, feature = "dev-signing"))]
 use k256::ecdsa::SigningKey as Secp256k1SigningKey;
 #[cfg(any(test, feature = "dev-signing"))]
@@ -406,9 +406,9 @@ fn canonical_ed25519_pubkey_from_hex(hex_str: &str) -> Option<Vec<u8>> {
 
 fn canonical_secp256k1_pubkey_from_hex(hex_str: &str) -> Option<Vec<u8>> {
     let bytes = visualsign::encodings::decode_hex(hex_str).ok()?;
-    let encoded_point = EncodedPoint::from_bytes(&bytes).ok()?;
-    let verifying_key = Secp256k1VerifyingKey::from_encoded_point(&encoded_point).ok()?;
-    Some(verifying_key.to_encoded_point(false).as_bytes().to_vec())
+    let encoded_point = Sec1Point::from_bytes(&bytes).ok()?;
+    let verifying_key = Secp256k1VerifyingKey::from_sec1_point(&encoded_point).ok()?;
+    Some(verifying_key.to_sec1_point(false).as_bytes().to_vec())
 }
 
 /// Validate a token-metadata entry's signature over `value`'s raw bytes,
@@ -510,10 +510,10 @@ fn validate_secp256k1(
     let pubkey_bytes = visualsign::encodings::decode_hex(public_key_hex).map_err(|e| {
         TokenMetadataSignatureError::Validation(format!("Invalid public key hex: {e}"))
     })?;
-    let encoded_point = EncodedPoint::from_bytes(&pubkey_bytes).map_err(|e| {
+    let encoded_point = Sec1Point::from_bytes(&pubkey_bytes).map_err(|e| {
         TokenMetadataSignatureError::Validation(format!("Invalid public key point: {e}"))
     })?;
-    let verifying_key = Secp256k1VerifyingKey::from_encoded_point(&encoded_point).map_err(|e| {
+    let verifying_key = Secp256k1VerifyingKey::from_sec1_point(&encoded_point).map_err(|e| {
         TokenMetadataSignatureError::Validation(format!("Invalid verifying key: {e}"))
     })?;
 
@@ -521,7 +521,7 @@ fn validate_secp256k1(
         TokenMetadataSignatureError::Validation(format!("Signature verification failed: {e}"))
     })?;
 
-    let signer_pubkey = verifying_key.to_encoded_point(false);
+    let signer_pubkey = verifying_key.to_sec1_point(false);
     Ok(SignerIdentity::of(
         allowlist,
         domain,
@@ -898,7 +898,7 @@ pub fn sign_token_metadata_secp256k1(
             },
             generated::parser::Metadata {
                 key: "public_key".to_string(),
-                value: hex::encode(verifying_key.to_encoded_point(false).as_bytes()),
+                value: hex::encode(verifying_key.to_sec1_point(false).as_bytes()),
             },
         ],
     })
@@ -1110,7 +1110,7 @@ mod tests {
         let verifying_key = Secp256k1VerifyingKey::from(&signing_key);
         allowlist_with(
             TokenMetadataDomain::Ethereum,
-            verifying_key.to_encoded_point(false).as_bytes().to_vec(),
+            verifying_key.to_sec1_point(false).as_bytes().to_vec(),
         )
     }
 
