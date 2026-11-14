@@ -10,7 +10,6 @@
 // their own prost dep in sync with this crate.
 pub use prost;
 pub use prost_types;
-pub use qos_hex;
 
 use google::rpc::Status;
 use prost::Message;
